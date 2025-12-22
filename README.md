@@ -1,3 +1,3 @@
-# ![HackerOS Installer - TUI installer for HackerOS.](https://github.com/HackerOS-Linux-System/Blue-Enviroment/blob/main/images/banner.png)
+# ![HackerOS Installer - TUI installer for HackerOS.](https://github.com/HackerOS-Linux-System/HackerOS-Updates/blob/main/HackerOS/ICONS/HackerOS-Download-Icon.png)
 # HackerOS-Installer
 Installer for HackerOS.
