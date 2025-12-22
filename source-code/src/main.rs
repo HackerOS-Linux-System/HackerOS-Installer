@@ -1,25 +1,22 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::path::Path;
 use std::fs::{self, File};
-use std::env;
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, ExecutableCommand};
+use crossterm::execute;
 use git2::Repository;
 use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Tabs};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use reqwest::Client;
-use tokio::task;
-use log::{info, error};
+use log::info;
 use env_logger;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,7 +296,7 @@ async fn handle_input_enter(state: &mut InstallerState, input_buffer: &mut Strin
     Ok(())
 }
 
-fn draw_ui(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, state: &InstallerState, list_state: &mut ListState, input_buffer: &str) {
+fn draw_ui(f: &mut ratatui::Frame, state: &InstallerState, list_state: &mut ListState, input_buffer: &str) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(3)])
@@ -318,10 +315,10 @@ fn draw_ui(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, state: &Install
         1 => draw_input_field(f, body_chunk, "Enter username:", input_buffer, Color::LightYellow),
         2 => draw_input_field(f, body_chunk, "Enter user password:", &"*".repeat(input_buffer.len()), Color::LightYellow),
         3 => draw_input_field(f, body_chunk, "Enter root password:", &"*".repeat(input_buffer.len()), Color::LightYellow),
-        4 => draw_edition_selection(f, body_chunk, list_state, state.edition.as_ref()),
-        5 => draw_branch_selection(f, body_chunk, list_state, state.branch.as_ref()),
-        6 => draw_filesystem_selection(f, body_chunk, list_state, state.filesystem.as_ref(), &state.edition),
-        7 => draw_partition_mode(f, body_chunk, list_state, state.manual_partition),
+        4 => draw_edition_selection(f, body_chunk, list_state),
+        5 => draw_branch_selection(f, body_chunk, list_state),
+        6 => draw_filesystem_selection(f, body_chunk, list_state, &state.edition),
+        7 => draw_partition_mode(f, body_chunk, list_state),
         8 => draw_input_field(f, body_chunk, "Enter disk (e.g., /dev/sda):", input_buffer, Color::LightMagenta),
         9 => draw_input_field(f, body_chunk, "Enter hostname (default: hackeros):", input_buffer, Color::LightGreen),
         10 => draw_timezone_selection(f, body_chunk, list_state),
@@ -349,7 +346,7 @@ fn draw_ui(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, state: &Install
     }
 }
 
-fn draw_welcome(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect) {
+fn draw_welcome(f: &mut ratatui::Frame, area: Rect) {
     let text = Text::from(vec![
         Line::from("Welcome to the enhanced HackerOS Installer!"),
         Line::from("This installer is designed for both beginners and professionals."),
@@ -363,7 +360,7 @@ fn draw_welcome(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect
     f.render_widget(paragraph, area);
 }
 
-fn draw_input_field(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, prompt: &str, input: &str, color: Color) {
+fn draw_input_field(f: &mut ratatui::Frame, area: Rect, prompt: &str, input: &str, color: Color) {
     let text = format!("{} {}", prompt, input);
     let paragraph = Paragraph::new(text)
         .block(Block::default().title("Input").borders(Borders::ALL).border_style(Style::default().fg(color)))
@@ -371,7 +368,7 @@ fn draw_input_field(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: 
     f.render_widget(paragraph, area);
 }
 
-fn draw_edition_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState, selected: Option<&Edition>) {
+fn draw_edition_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState) {
     let items = vec![
         ListItem::new(Span::styled("Official (KDE Plasma + SDDM)", Style::default().fg(Color::White))),
         ListItem::new(Span::styled("Gnome (GNOME + GDM3)", Style::default().fg(Color::White))),
@@ -393,7 +390,7 @@ fn draw_edition_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, 
     f.render_stateful_widget(list, area, list_state);
 }
 
-fn draw_branch_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState, selected: Option<&DebianBranch>) {
+fn draw_branch_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState) {
     let items = vec![
         ListItem::new("Stable (trixie)"),
         ListItem::new("Testing (forky)"),
@@ -410,7 +407,7 @@ fn draw_branch_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, a
     f.render_stateful_widget(list, area, list_state);
 }
 
-fn draw_filesystem_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState, selected: Option<&Filesystem>, edition: &Option<Edition>) {
+fn draw_filesystem_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState, edition: &Option<Edition>) {
     if edition == &Some(Edition::Atomic) {
         let text = Text::from("For Atomic edition, filesystem is automatically set to Btrfs.");
         let paragraph = Paragraph::new(text)
@@ -436,7 +433,7 @@ fn draw_filesystem_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>
     }
 }
 
-fn draw_partition_mode(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState, manual: bool) {
+fn draw_partition_mode(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState) {
     let items = vec![
         ListItem::new("Automatic Partitioning (Easy mode)"),
         ListItem::new("Manual Partitioning (Advanced)"),
@@ -452,7 +449,7 @@ fn draw_partition_mode(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, are
     f.render_stateful_widget(list, area, list_state);
 }
 
-fn draw_timezone_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState) {
+fn draw_timezone_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState) {
     let items = vec![
         ListItem::new("UTC"),
         ListItem::new("America/New_York"),
@@ -470,7 +467,7 @@ fn draw_timezone_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>,
     f.render_stateful_widget(list, area, list_state);
 }
 
-fn draw_locale_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, list_state: &mut ListState) {
+fn draw_locale_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut ListState) {
     let items = vec![
         ListItem::new("en_US.UTF-8"),
         ListItem::new("pl_PL.UTF-8"),
@@ -487,8 +484,8 @@ fn draw_locale_selection(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, a
     f.render_stateful_widget(list, area, list_state);
 }
 
-fn draw_summary(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, state: &InstallerState) {
-    let mut lines = vec![
+fn draw_summary(f: &mut ratatui::Frame, area: Rect, state: &InstallerState) {
+    let lines = vec![
         Line::from(Span::styled(format!("Username: {}", state.username), Style::default().fg(Color::LightBlue))),
         Line::from(Span::styled(format!("Hostname: {}", state.hostname), Style::default().fg(Color::LightBlue))),
         Line::from(Span::styled(format!("Edition: {:?}", state.edition), Style::default().fg(Color::LightGreen))),
@@ -509,7 +506,7 @@ fn draw_summary(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect
     f.render_widget(paragraph, area);
 }
 
-fn draw_image_preview(f: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, area: Rect, edition: Option<&Edition>) {
+fn draw_image_preview(f: &mut ratatui::Frame, area: Rect, edition: Option<&Edition>) {
     let image_name = match edition {
         Some(Edition::Official) => "plasma.png",
         Some(Edition::Gnome) => "gnome.png",
@@ -546,7 +543,7 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
     fs::write("/etc/apt/sources.list", format!("deb http://deb.debian.org/debian {} main contrib non-free non-free-firmware", branch_str))?;
 
     let pb = ProgressBar::new(5);
-    pb.set_style(ProgressStyle::default_bar().template("{msg} {bar:40.cyan/blue} {percent}% {eta}"));
+    pb.set_style(ProgressStyle::default_bar().template("{msg} {bar:40.cyan/blue} {percent}% {eta}").unwrap());
     pb.set_message("Updating packages...");
     Command::new("apt").args(&["update", "-y"]).status()?;
     pb.inc(1);
