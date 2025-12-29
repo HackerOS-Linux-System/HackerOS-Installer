@@ -2,7 +2,6 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::path::Path;
 use std::fs::{self, File};
-
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -33,9 +32,9 @@ enum Edition {
 
 #[derive(Debug, Clone, PartialEq)]
 enum DebianBranch {
-    Stable,    // trixie
-    Testing,   // forky
-    Unstable,  // sid
+    Stable, // trixie
+    Testing, // forky
+    Unstable, // sid
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,8 +44,15 @@ enum Filesystem {
     Zfs,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum InstallerMode {
+    Custom,
+    Gaming,
+}
+
 #[derive(Debug, Clone)]
 struct InstallerState {
+    mode: InstallerMode,
     current_step: usize,
     username: String,
     password: String,
@@ -67,6 +73,7 @@ struct InstallerState {
 impl Default for InstallerState {
     fn default() -> Self {
         InstallerState {
+            mode: InstallerMode::Custom,
             current_step: 0,
             username: String::new(),
             password: String::new(),
@@ -90,10 +97,40 @@ impl Default for InstallerState {
 async fn main() -> Result<()> {
     env_logger::init();
     let mut state = InstallerState::default();
+
+    let config_path = Path::new("/root/.config/hackeros/HackerOS-Installer/config.hacker");
+    if config_path.exists() {
+        if let Ok(content) = fs::read_to_string(config_path) {
+            if content.contains("[gaming]") {
+                state.mode = InstallerMode::Gaming;
+                state.branch = Some(DebianBranch::Stable);
+                state.filesystem = Some(Filesystem::Ext4);
+            }
+        }
+    }
+
+    if state.mode == InstallerMode::Gaming {
+        let client = Client::new();
+        if !has_internet(&client).await {
+            state.error_message = Some("No internet connection detected. Attempting to connect...".to_string());
+            let _ = Command::new("dhclient").status();
+            if !has_internet(&client).await {
+                state.error_message = Some("Failed to establish internet connection. Gaming mode requires internet.".to_string());
+                // Proceed but installation may fail later
+            } else {
+                state.error_message = None;
+            }
+        }
+    }
+
     setup_terminal()?;
     let res = run_app(&mut state).await;
     teardown_terminal()?;
     res
+}
+
+async fn has_internet(client: &Client) -> bool {
+    client.head("http://deb.debian.org").send().await.is_ok()
 }
 
 fn setup_terminal() -> Result<()> {
@@ -112,14 +149,11 @@ async fn run_app(state: &mut InstallerState) -> Result<()> {
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let mut list_state = ListState::default();
     let mut input_buffer = String::new();
     let mut active_input = false;
-
     loop {
         terminal.draw(|f| draw_ui(f, state, &mut list_state, &input_buffer))?;
-
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
@@ -161,11 +195,9 @@ async fn run_app(state: &mut InstallerState) -> Result<()> {
                 }
             }
         }
-
         if state.quit {
             break;
         }
-
         if state.current_step >= 13 { // More steps now
             if let Err(e) = perform_installation(state).await {
                 state.error_message = Some(e.to_string());
@@ -174,7 +206,6 @@ async fn run_app(state: &mut InstallerState) -> Result<()> {
             }
         }
     }
-
     Ok(())
 }
 
@@ -189,49 +220,55 @@ async fn handle_selection_enter(state: &mut InstallerState, list_state: &mut Lis
     match state.current_step {
         0 => state.current_step += 1,
         4 => {
-            if let Some(selected) = list_state.selected() {
-                state.edition = Some(match selected {
-                    0 => Edition::Official,
-                    1 => Edition::Gnome,
-                    2 => Edition::Xfce,
-                    3 => Edition::Blue,
-                    4 => Edition::Hydra,
-                    5 => Edition::Cybersecurity,
-                    6 => Edition::Wayfire,
-                    7 => Edition::Atomic,
-                    _ => return Ok(()),
-                });
-                if state.edition == Some(Edition::Atomic) {
-                    state.filesystem = Some(Filesystem::Btrfs);
+            if state.mode == InstallerMode::Custom {
+                if let Some(selected) = list_state.selected() {
+                    state.edition = Some(match selected {
+                        0 => Edition::Official,
+                        1 => Edition::Gnome,
+                        2 => Edition::Xfce,
+                        3 => Edition::Blue,
+                        4 => Edition::Hydra,
+                        5 => Edition::Cybersecurity,
+                        6 => Edition::Wayfire,
+                        7 => Edition::Atomic,
+                        _ => return Ok(()),
+                    });
+                    if state.edition == Some(Edition::Atomic) {
+                        state.filesystem = Some(Filesystem::Btrfs);
+                    }
+                    state.preview_image = true;
+                    state.current_step += 1;
                 }
-                state.preview_image = true;
-                state.current_step += 1;
             }
         }
         5 => {
-            if let Some(selected) = list_state.selected() {
-                state.branch = Some(match selected {
-                    0 => DebianBranch::Stable,
-                    1 => DebianBranch::Testing,
-                    2 => DebianBranch::Unstable,
-                    _ => return Ok(()),
-                });
-                state.current_step += 1;
-            }
-        }
-        6 => {
-            if state.edition != Some(Edition::Atomic) {
+            if state.mode == InstallerMode::Custom {
                 if let Some(selected) = list_state.selected() {
-                    state.filesystem = Some(match selected {
-                        0 => Filesystem::Btrfs,
-                        1 => Filesystem::Ext4,
-                        2 => Filesystem::Zfs,
+                    state.branch = Some(match selected {
+                        0 => DebianBranch::Stable,
+                        1 => DebianBranch::Testing,
+                        2 => DebianBranch::Unstable,
                         _ => return Ok(()),
                     });
                     state.current_step += 1;
                 }
-            } else {
-                state.current_step += 1; // Skip for Atomic
+            }
+        }
+        6 => {
+            if state.mode == InstallerMode::Custom {
+                if state.edition != Some(Edition::Atomic) {
+                    if let Some(selected) = list_state.selected() {
+                        state.filesystem = Some(match selected {
+                            0 => Filesystem::Btrfs,
+                            1 => Filesystem::Ext4,
+                            2 => Filesystem::Zfs,
+                            _ => return Ok(()),
+                        });
+                        state.current_step += 1;
+                    }
+                } else {
+                    state.current_step += 1; // Skip for Atomic
+                }
             }
         }
         7 => {
@@ -278,15 +315,22 @@ async fn handle_input_enter(state: &mut InstallerState, input_buffer: &mut Strin
         match state.current_step {
             1 => { state.username = input_buffer.clone(); state.current_step += 1; }
             2 => { state.password = input_buffer.clone(); state.current_step += 1; }
-            3 => { state.root_password = input_buffer.clone(); state.current_step += 1; }
+            3 => { 
+                state.root_password = input_buffer.clone(); 
+                if state.mode == InstallerMode::Gaming {
+                    state.current_step = 7;
+                } else {
+                    state.current_step += 1;
+                }
+            }
             8 => { state.disk = input_buffer.clone(); state.current_step += 1; }
-            9 => { 
+            9 => {
                 if input_buffer.is_empty() {
                     state.hostname = "hackeros".to_string();
                 } else {
-                    state.hostname = input_buffer.clone(); 
+                    state.hostname = input_buffer.clone();
                 }
-                state.current_step += 1; 
+                state.current_step += 1;
             }
             _ => {}
         }
@@ -301,23 +345,20 @@ fn draw_ui(f: &mut ratatui::Frame, state: &InstallerState, list_state: &mut List
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(3)])
         .split(f.area());
-
     let header = Paragraph::new("HackerOS Installer v0.2 - Inspired by Arch Linux")
         .style(Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD | Modifier::ITALIC))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
     f.render_widget(header, main_layout[0]);
-
     let body_chunk = main_layout[1];
-
     match state.current_step {
         0 => draw_welcome(f, body_chunk),
         1 => draw_input_field(f, body_chunk, "Enter username:", input_buffer, Color::LightYellow),
         2 => draw_input_field(f, body_chunk, "Enter user password:", &"*".repeat(input_buffer.len()), Color::LightYellow),
         3 => draw_input_field(f, body_chunk, "Enter root password:", &"*".repeat(input_buffer.len()), Color::LightYellow),
-        4 => draw_edition_selection(f, body_chunk, list_state),
-        5 => draw_branch_selection(f, body_chunk, list_state),
-        6 => draw_filesystem_selection(f, body_chunk, list_state, &state.edition),
+        4 if state.mode == InstallerMode::Custom => draw_edition_selection(f, body_chunk, list_state),
+        5 if state.mode == InstallerMode::Custom => draw_branch_selection(f, body_chunk, list_state),
+        6 if state.mode == InstallerMode::Custom => draw_filesystem_selection(f, body_chunk, list_state, &state.edition),
         7 => draw_partition_mode(f, body_chunk, list_state),
         8 => draw_input_field(f, body_chunk, "Enter disk (e.g., /dev/sda):", input_buffer, Color::LightMagenta),
         9 => draw_input_field(f, body_chunk, "Enter hostname (default: hackeros):", input_buffer, Color::LightGreen),
@@ -326,11 +367,9 @@ fn draw_ui(f: &mut ratatui::Frame, state: &InstallerState, list_state: &mut List
         12 => draw_summary(f, body_chunk, state),
         _ => {}
     }
-
-    if state.preview_image {
+    if state.preview_image && state.mode == InstallerMode::Custom {
         draw_image_preview(f, body_chunk, state.edition.as_ref());
     }
-
     if let Some(err) = &state.error_message {
         let footer = Paragraph::new(err.as_str())
             .style(Style::default().fg(Color::Red))
@@ -485,10 +524,9 @@ fn draw_locale_selection(f: &mut ratatui::Frame, area: Rect, list_state: &mut Li
 }
 
 fn draw_summary(f: &mut ratatui::Frame, area: Rect, state: &InstallerState) {
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(format!("Username: {}", state.username), Style::default().fg(Color::LightBlue))),
         Line::from(Span::styled(format!("Hostname: {}", state.hostname), Style::default().fg(Color::LightBlue))),
-        Line::from(Span::styled(format!("Edition: {:?}", state.edition), Style::default().fg(Color::LightGreen))),
         Line::from(Span::styled(format!("Branch: {:?}", state.branch), Style::default().fg(Color::LightGreen))),
         Line::from(Span::styled(format!("Filesystem: {:?}", state.filesystem), Style::default().fg(Color::LightYellow))),
         Line::from(Span::styled(format!("Manual Partition: {}", state.manual_partition), Style::default().fg(Color::LightYellow))),
@@ -498,6 +536,11 @@ fn draw_summary(f: &mut ratatui::Frame, area: Rect, state: &InstallerState) {
         Line::from(""),
         Line::from(Span::styled("Press Enter to start installation.", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
     ];
+    if state.mode == InstallerMode::Custom {
+        lines.insert(2, Line::from(Span::styled(format!("Edition: {:?}", state.edition), Style::default().fg(Color::LightGreen))));
+    } else {
+        lines.insert(2, Line::from(Span::styled("Edition: Gaming (Plasma + SDDM + Gamescope Steam)", Style::default().fg(Color::LightGreen))));
+    }
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(Block::default().title("Installation Summary").borders(Borders::ALL).border_style(Style::default().fg(Color::Magenta)))
@@ -533,7 +576,6 @@ fn draw_image_preview(f: &mut ratatui::Frame, area: Rect, edition: Option<&Editi
 
 async fn perform_installation(state: &InstallerState) -> Result<()> {
     info!("Starting installation process...");
-
     // Update sources.list
     let branch_str = match state.branch.as_ref().unwrap() {
         DebianBranch::Stable => "trixie",
@@ -541,13 +583,11 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
         DebianBranch::Unstable => "sid",
     };
     fs::write("/etc/apt/sources.list", format!("deb http://deb.debian.org/debian {} main contrib non-free non-free-firmware", branch_str))?;
-
     let pb = ProgressBar::new(5);
     pb.set_style(ProgressStyle::default_bar().template("{msg} {bar:40.cyan/blue} {percent}% {eta}").unwrap());
     pb.set_message("Updating packages...");
     Command::new("apt").args(&["update", "-y"]).status()?;
     pb.inc(1);
-
     // Partition disk
     pb.set_message("Partitioning disk...");
     if state.manual_partition {
@@ -563,7 +603,6 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
         child.wait()?;
     }
     pb.inc(1);
-
     // Format filesystem
     pb.set_message("Formatting filesystem...");
     let root_part = format!("{}2", state.disk);
@@ -576,7 +615,6 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
     };
     Command::new("sh").args(&["-c", &format!("{} {}", fs_cmd, root_part)]).status()?;
     pb.inc(1);
-
     // Mount
     pb.set_message("Mounting partitions...");
     fs::create_dir_all("/mnt")?;
@@ -584,18 +622,15 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
     fs::create_dir_all("/mnt/boot/efi")?;
     Command::new("mount").arg(&boot_part).arg("/mnt/boot/efi").status()?;
     pb.inc(1);
-
     // Install base system
     pb.set_message("Installing base system...");
     Command::new("debootstrap").args(&[branch_str, "/mnt", "http://deb.debian.org/debian/"]).status()?;
     pb.inc(1);
-
     // Bind mounts
     for dir in &["/dev", "/proc", "/sys", "/run"] {
         fs::create_dir_all(format!("/mnt{}", dir))?;
         Command::new("mount").args(&["--bind", dir, &format!("/mnt{}", dir)]).status()?;
     }
-
     // Chroot commands
     let chroot_cmd = |cmd: &str| -> Result<()> {
         info!("Executing in chroot: {}", cmd);
@@ -609,57 +644,57 @@ async fn perform_installation(state: &InstallerState) -> Result<()> {
             .then_some(())
             .ok_or(anyhow::anyhow!("Command failed: {}", cmd))
     };
-
     chroot_cmd("apt update -y")?;
     chroot_cmd("apt install -y linux-image-amd64 grub-efi-amd64 sudo locales tzdata")?;
-
     // Set locale and timezone
     chroot_cmd(&format!("echo '{}' > /etc/locale.gen", state.locale))?;
     chroot_cmd("locale-gen")?;
     chroot_cmd(&format!("ln -sf /usr/share/zoneinfo/{} /etc/localtime", state.timezone))?;
     chroot_cmd("hwclock --systohc")?;
-
     // Create users
-    chroot_cmd("passwd root")?; // Set root password interactively? But we have it
     let mut child = Command::new("chroot").arg("/mnt").arg("passwd").arg("root").stdin(Stdio::piped()).spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(format!("{}\n{}\n", state.root_password, state.root_password).as_bytes())?;
     }
     child.wait()?;
-
     chroot_cmd(&format!("useradd -m -G sudo,wheel,audio,video -s /bin/bash {}", state.username))?;
     let mut child = Command::new("chroot").arg("/mnt").arg("passwd").arg(&state.username).stdin(Stdio::piped()).spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(format!("{}\n{}\n", state.password, state.password).as_bytes())?;
     }
     child.wait()?;
-
     // Hostname
     fs::write("/mnt/etc/hostname", &state.hostname)?;
     fs::write("/mnt/etc/hosts", format!("127.0.0.1 localhost\n127.0.1.1 {}\n", state.hostname))?;
-
-    // Install edition
-    install_edition(state.edition.as_ref().unwrap(), state).await?;
-
+    // Copy base files
+    copy_dir("/usr/share/HackerOS-Installer/official/", "/mnt/")?;
+    // Install edition or gaming
+    if state.mode == InstallerMode::Custom {
+        install_edition(state.edition.as_ref().unwrap(), state).await?;
+    } else {
+        install_gaming(state, &chroot_cmd).await?;
+    }
     // Grub
     chroot_cmd(&format!("grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=HackerOS {}", state.disk))?;
     chroot_cmd("update-grub")?;
-
+    // Remove installer files from installed system
+    if state.mode == InstallerMode::Gaming {
+        let _ = fs::remove_file("/mnt/usr/bin/HackerOS-Installer");
+        let _ = fs::remove_file("/mnt/etc/systemd/system/installer.service");
+        let _ = fs::remove_dir_all("/mnt/etc/systemd/system/getty@tty1.service.d");
+    }
     // Cleanup
     for dir in &["/dev/pts", "/dev", "/proc", "/sys", "/run"] {
-        Command::new("umount").arg(format!("/mnt{}", dir)).status()?;
+        let _ = Command::new("umount").arg(format!("/mnt{}", dir)).status();
     }
     Command::new("umount").arg("/mnt/boot/efi").status()?;
     Command::new("umount").arg("/mnt").status()?;
-
-    // Remove installer files
-    fs::remove_dir_all("/usr/share/HackerOS-Installer")?;
-    fs::remove_file("/usr/bin/HackerOS-Installer")?;
-    fs::remove_file("/etc/profile.d/HackerOS-Installer.sh")?;
-
+    // Remove installer files from live environment
+    let _ = fs::remove_dir_all("/usr/share/HackerOS-Installer");
+    let _ = fs::remove_file("/usr/bin/HackerOS-Installer");
+    let _ = fs::remove_file("/etc/profile.d/HackerOS-Installer.sh");
     info!("Installation complete. Rebooting...");
     Command::new("reboot").status()?;
-
     Ok(())
 }
 
@@ -672,9 +707,6 @@ async fn install_edition(edition: &Edition, state: &InstallerState) -> Result<()
             .arg(cmd)
             .status()
     };
-
-    copy_dir("/usr/share/HackerOS-Installer/official/", "/mnt/")?;
-
     match edition {
         Edition::Official => {
             chroot_cmd("apt install -y task-kde-desktop sddm")?;
@@ -738,7 +770,47 @@ async fn install_edition(edition: &Edition, state: &InstallerState) -> Result<()
             chroot_cmd("hammer setup")?;
         }
     }
+    Ok(())
+}
 
+async fn install_gaming(state: &InstallerState, chroot_cmd: &impl Fn(&str) -> Result<()>) -> Result<()> {
+    chroot_cmd("apt install -y plasma-desktop sddm distrobox podman")?;
+    // Set autologin
+    let sddm_conf = format!(
+        r#"[Autologin]
+User={}
+Session=gamescope-session-steam.desktop
+[General]
+DisplayServer=wayland
+"#,
+        state.username
+    );
+    fs::write("/mnt/etc/sddm.conf", sddm_conf)?;
+    // Create gamescope-session-steam.desktop
+    let desktop_file = r#"[Desktop Entry]
+Name=Gamescope Steam
+Comment=Steam Big Picture Mode in Gamescope
+Exec=distrobox enter HackerOS-Steam -- gamescope -e -- steam -gamepadui
+TryExec=distrobox
+Type=Application
+DesktopNames=Gamescope-Steam
+"#;
+    fs::create_dir_all("/mnt/usr/share/wayland-sessions/")?;
+    fs::write("/mnt/usr/share/wayland-sessions/gamescope-session-steam.desktop", desktop_file)?;
+    // Setup distrobox and install packages
+    chroot_cmd(&format!(
+        "su - {} -c 'distrobox create --name HackerOS-Steam --image archlinux:latest --yes'",
+        state.username
+    ))?;
+    let container_cmds = r#"echo -e '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist' | sudo tee -a /etc/pacman.conf >/dev/null
+sudo pacman -Syu --noconfirm
+sudo pacman -S --noconfirm steam lib32-mesa lib32-vulkan-icd-loader lib32-alsa-lib lib32-gcc-libs lib32-gtk3 lib32-libgcrypt lib32-libpulse lib32-libva lib32-libxml2 lib32-nss lib32-openal lib32-sdl2 lib32-vulkan-intel lib32-vulkan-radeon lib32-nvidia-utils lib32-libxss lib32-libgpg-error lib32-dbus gnu-free-fonts noto-fonts ttf-bitstream-vera ttf-croscore ttf-dejavu ttf-droid ttf-ibm-plex ttf-input ttf-input-nerd ttf-liberation ttf-roboto lib32-vulkan-asahi lib32-vulkan-dzn lib32-vulkan-freedreno lib32-vulkan-gfxstream lib32-vulkan-nouveau lib32-vulkan-swrast lib32-vulkan-virtio gamescope
+"#;
+    chroot_cmd(&format!(
+        "su - {} -c \"distrobox enter HackerOS-Steam -- bash -c \\\"{}\\\"\"",
+        state.username,
+        container_cmds.replace("\"", "\\\"")
+    ))?;
     Ok(())
 }
 
