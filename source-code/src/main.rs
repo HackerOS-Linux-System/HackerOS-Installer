@@ -722,12 +722,12 @@ async fn install_edition(edition: &Edition, state: &InstallerState) -> Result<()
             let home = format!("/mnt/home/{}/.hackeros/Blue-Environment/", state.username);
             fs::create_dir_all(&home)?;
             let components = vec![
-                ("wm", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/wm"),
-                ("shell", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/shell"),
-                ("launcher", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/launcher"),
-                ("Desktop", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/Desktop"),
-                ("decorations", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/decorations"),
-                ("core", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.1/core"),
+                ("wm", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/wm"),
+                ("shell", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/shell"),
+                ("launcher", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/launcher"),
+                ("Desktop", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/Desktop"),
+                ("decorations", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/decorations"),
+                ("core", "https://github.com/HackerOS-Linux-System/Blue-Environment/releases/download/v0.2/core"),
             ];
             for (name, url) in components {
                 download_file(&client, url, &format!("{}/{}", home, name)).await?;
@@ -751,15 +751,18 @@ async fn install_edition(edition: &Edition, state: &InstallerState) -> Result<()
         }
         Edition::Atomic => {
             let client = Client::new();
-            download_file(&client, "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.5/hammer", "/mnt/usr/bin/hammer").await?;
+            download_file(&client, "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer", "/mnt/usr/bin/hammer").await?;
             Command::new("chroot").arg("/mnt").arg("chmod").args(&["+x", "/usr/bin/hammer"]).status()?;
             let lib_dir = "/mnt/usr/lib/HackerOS/hammer/";
             fs::create_dir_all(lib_dir)?;
             let hammer_components = vec![
-                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.5/hammer-updater",
-                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.5/hammer-tui",
-                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.5/hammer-core",
-                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.5/hammer-builder",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-updater",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-tui",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-core",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-containers",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-read",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v1.0/hammer-progress-bar",
+                "https://github.com/HackerOS-Linux-System/hammer/releases/download/v0.9/hammer-builder",
             ];
             for url in hammer_components {
                 let name = url.split('/').last().unwrap();
