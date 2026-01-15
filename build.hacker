@@ -1,4 +1,5 @@
 // cargo
 
 > cd source-code
-> cargo build --release
+> cd gaming-edition && cargo build --release
+> cd .. && cd custom-edition && cargo build --release
