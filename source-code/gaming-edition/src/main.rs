@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -7,24 +7,18 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    style::{Modifier, Style},
+    text::Text,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::{
-    env,
-    fs::{self, File},
-    io::{self, BufRead, Write},
-    path::Path,
-    process::{Command, Stdio},
+    fs,
+    io,
+    process::Command,
     sync::{Arc, Mutex},
-    thread,
-    time::Duration,
 };
-use sysinfo::{System, SystemExt};
 
-// Enums and Structs for Installer State
 #[derive(Clone, PartialEq)]
 enum InstallerStep {
     Welcome,
@@ -77,27 +71,28 @@ impl Default for InstallerState {
     }
 }
 
-// Main function
+enum MainContent<'a> {
+    Paragraph(Paragraph<'a>),
+    List(List<'a>),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(InstallerState::default()));
 
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Run the UI loop
     let res = run_app(&mut terminal, state.clone()).await;
 
-    // Restore terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+             LeaveAlternateScreen,
+             DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -128,74 +123,83 @@ async fn run_app<B: Backend>(
     }
 }
 
-fn ui(f: &mut Frame, state: &InstallerState, list_state: &mut ListState) {
+fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut ListState) {
     let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
-        .split(f.size());
+    .direction(Direction::Vertical)
+    .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+    .split(f.size());
 
     let main_block = Block::default()
-        .title("HackerOS Installer")
-        .borders(Borders::ALL);
+    .title("HackerOS Installer")
+    .borders(Borders::ALL);
     let progress_block = Block::default().title("Progress").borders(Borders::ALL);
 
     let main_content = match state.current_step {
-        InstallerStep::Welcome => Paragraph::new(Text::from("Welcome to HackerOS Installer. Press Enter to start."))
-            .wrap(Wrap::default()),
-        InstallerStep::CreateUser => Paragraph::new(Text::from(format!(
+        InstallerStep::Welcome => MainContent::Paragraph(Paragraph::new(Text::from("Welcome to HackerOS Installer. Press Enter to start."))
+        .wrap(Wrap::default())),
+        InstallerStep::CreateUser => MainContent::Paragraph(Paragraph::new(Text::from(format!(
             "Enter username: {}\nEnter password: {}",
             state.username, "*".repeat(state.password.len())
-        ))),
-        InstallerStep::SelectLocale => Paragraph::new(Text::from(format!(
+        )))),
+        InstallerStep::SelectLocale => MainContent::Paragraph(Paragraph::new(Text::from(format!(
             "Select country: {}\nSelect timezone: {}",
             state.country, state.timezone
-        ))),
-        InstallerStep::PartitionDisk => Paragraph::new(Text::from(format!(
+        )))),
+        InstallerStep::PartitionDisk => MainContent::Paragraph(Paragraph::new(Text::from(format!(
             "Auto partition? {}\nTarget disk: {}",
             if state.auto_partition { "Yes" } else { "No" },
-            state.target_disk
-        ))),
+                state.target_disk
+        )))),
         InstallerStep::SelectDesktop => {
             let items = vec![
                 ListItem::new("KDE Plasma"),
                 ListItem::new("GNOME"),
                 ListItem::new("Hydra"),
             ];
-            list_state.select(Some(match state.desktop_env.as_str() {
-                "kde" => 0,
-                "gnome" => 1,
-                "hydra" => 2,
-                _ => 0,
-            }));
-            List::new(items)
+            MainContent::List(
+                List::new(items)
                 .block(Block::default().title("Select Desktop Environment").borders(Borders::ALL))
-                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
+            )
         }
-        InstallerStep::ConfigureNetwork => Paragraph::new(Text::from(
+        InstallerStep::ConfigureNetwork => MainContent::Paragraph(Paragraph::new(Text::from(
             "Configure network. Press Enter to connect (assuming DHCP).",
-        )),
-        InstallerStep::InstallSystem => Paragraph::new(Text::from("Installing system...")),
-        InstallerStep::DetectGPU => Paragraph::new(Text::from("Detecting GPU and installing drivers...")),
-        InstallerStep::InstallKernel => Paragraph::new(Text::from("Installing kernel...")),
-        InstallerStep::Finalize => Paragraph::new(Text::from("Finalizing installation...")),
-        InstallerStep::Done => Paragraph::new(Text::from("Installation complete. Reboot.")),
+        ))),
+        InstallerStep::InstallSystem => MainContent::Paragraph(Paragraph::new(Text::from("Installing system..."))),
+        InstallerStep::DetectGPU => MainContent::Paragraph(Paragraph::new(Text::from("Detecting GPU and installing drivers..."))),
+        InstallerStep::InstallKernel => MainContent::Paragraph(Paragraph::new(Text::from("Installing kernel..."))),
+        InstallerStep::Finalize => MainContent::Paragraph(Paragraph::new(Text::from("Finalizing installation..."))),
+        InstallerStep::Done => MainContent::Paragraph(Paragraph::new(Text::from("Installation complete. Reboot."))),
     };
 
-    f.render_widget(main_block, chunks[0]);
+    f.render_widget(main_block.clone(), chunks[0]);
     let inner_area = main_block.inner(chunks[0]);
+
     if state.current_step == InstallerStep::SelectDesktop {
-        f.render_stateful_widget(main_content, inner_area, list_state);
-    } else {
-        f.render_widget(main_content, inner_area);
+        list_state.select(Some(match state.desktop_env.as_str() {
+            "kde" => 0,
+            "gnome" => 1,
+            "hydra" => 2,
+            _ => 0,
+        }));
+    }
+
+    match main_content {
+        MainContent::List(l) => {
+            f.render_stateful_widget(l, inner_area, list_state);
+        }
+        MainContent::Paragraph(p) => {
+            f.render_widget(p, inner_area);
+        }
     }
 
     let progress_items: Vec<ListItem> = state
-        .progress
-        .iter()
-        .map(|s| ListItem::new(s.as_str()))
-        .collect();
+    .progress
+    .iter()
+    .map(|s| ListItem::new(s.as_str()))
+    .collect();
     let progress_list = List::new(progress_items);
-    f.render_widget(progress_block, chunks[1]);
+    f.render_widget(progress_block.clone(), chunks[1]);
     let inner_progress = progress_block.inner(chunks[1]);
     f.render_widget(progress_list, inner_progress);
 }
@@ -213,28 +217,27 @@ async fn handle_key_event(
             }
         }
         InstallerStep::CreateUser => match code {
-            KeyCode::Char(c) if locked_state.username.len() < 20 && locked_state.password.is_empty() => {
+            KeyCode::Char(c) if locked_state.password.is_empty() => {
                 locked_state.username.push(c);
             }
             KeyCode::Backspace if !locked_state.username.is_empty() && locked_state.password.is_empty() => {
                 locked_state.username.pop();
             }
             KeyCode::Enter if !locked_state.username.is_empty() && locked_state.password.is_empty() => {
-                // Move to password
+                // Move to password input
             }
-            KeyCode::Char(c) if !locked_state.username.is_empty() && locked_state.password.len() < 20 => {
+            KeyCode::Char(c) if !locked_state.username.is_empty() => {
                 locked_state.password.push(c);
             }
             KeyCode::Backspace if !locked_state.password.is_empty() => {
                 locked_state.password.pop();
             }
-            KeyCode::Enter if !locked_state.password.is_empty() => {
+            KeyCode::Enter if !locked_state.username.is_empty() && !locked_state.password.is_empty() => {
                 locked_state.current_step = InstallerStep::SelectLocale;
             }
             _ => {}
         },
         InstallerStep::SelectLocale => {
-            // Simplified: hardcode for now
             if code == KeyCode::Enter {
                 locked_state.current_step = InstallerStep::PartitionDisk;
             }
@@ -251,17 +254,11 @@ async fn handle_key_event(
         }
         InstallerStep::SelectDesktop => match code {
             KeyCode::Up => {
-                let i = match list_state.selected() {
-                    Some(i) if i > 0 => i - 1,
-                    _ => 0,
-                };
+                let i = list_state.selected().map_or(0, |i| if i > 0 { i - 1 } else { 0 });
                 list_state.select(Some(i));
             }
             KeyCode::Down => {
-                let i = match list_state.selected() {
-                    Some(i) if i < 2 => i + 1,
-                    _ => 2,
-                };
+                let i = list_state.selected().map_or(2, |i| if i < 2 { i + 1 } else { 2 });
                 list_state.select(Some(i));
             }
             KeyCode::Enter => {
@@ -279,7 +276,7 @@ async fn handle_key_event(
             if code == KeyCode::Enter {
                 configure_network(&mut locked_state)?;
                 locked_state.current_step = InstallerStep::InstallSystem;
-                drop(locked_state); // Unlock before async
+                drop(locked_state);
                 perform_installation(state.clone()).await?;
             }
         }
@@ -291,31 +288,27 @@ async fn handle_key_event(
 fn perform_partitioning(state: &mut InstallerState) -> Result<()> {
     state.progress.push("Partitioning disk...".to_string());
     if state.auto_partition {
-        // Simple auto partition example: create one partition
         Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "echo 'o\nn\np\n1\n\n\nw' | fdisk {} && mkfs.ext4 {}1",
-                state.target_disk, state.target_disk
-            ))
-            .output()?;
+        .arg("-c")
+        .arg(format!(
+            "echo 'o\nn\np\n1\n\n\nw' | fdisk {} && mkfs.ext4 {}1",
+            state.target_disk, state.target_disk
+        ))
+        .output()?;
         state.progress.push("Auto partitioning done.".to_string());
     } else {
-        // Manual: assume user does it externally for simplicity
         state.progress.push("Manual partitioning: please configure externally.".to_string());
     }
-    // Mount
     fs::create_dir_all(&state.mount_point)?;
     Command::new("mount")
-        .arg(format!("{}1", state.target_disk))
-        .arg(&state.mount_point)
-        .output()?;
+    .arg(format!("{}1", state.target_disk))
+    .arg(&state.mount_point)
+    .output()?;
     state.progress.push("Disk mounted.".to_string());
     Ok(())
 }
 
 fn configure_network(state: &mut InstallerState) -> Result<()> {
-    // Assume DHCP
     Command::new("dhclient").output()?;
     state.network_configured = true;
     state.progress.push("Network configured.".to_string());
@@ -325,62 +318,54 @@ fn configure_network(state: &mut InstallerState) -> Result<()> {
 async fn perform_installation(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
     locked_state.progress.push("Starting installation...".to_string());
+    let mount_point = locked_state.mount_point.clone();
 
-    // Install base system (debootstrap or copy from live)
-    // Assuming copy from live to target
     Command::new("rsync")
-        .args(&["-aAXv", "--exclude=/dev/*", "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/tmp/*", "--exclude=/run/*", "--exclude=/mnt/*", "--exclude=/media/*", "--exclude=/lost+found", "/", &locked_state.mount_point])
-        .output()?;
+    .args(&["-aAXv", "--exclude=/dev/*", "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/tmp/*", "--exclude=/run/*", "--exclude=/mnt/*", "--exclude=/media/*", "--exclude=/lost+found", "/", &mount_point])
+    .output()?;
     locked_state.progress.push("Base system copied.".to_string());
 
-    // Chroot setup
-    let chroot_cmd = |cmd: &str| -> Result<()> {
+    let chroot_cmd = move |cmd: &str| -> Result<()> {
         Command::new("chroot")
-            .arg(&locked_state.mount_point)
-            .arg("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()?;
+        .arg(&mount_point)
+        .arg("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()?;
         Ok(())
     };
 
-    // Create user
     chroot_cmd(&format!(
         "useradd -m {} && echo '{}:{}' | chpasswd",
         locked_state.username, locked_state.username, locked_state.password
     ))?;
     locked_state.progress.push("User created.".to_string());
 
-    // Set locale/timezone
     chroot_cmd(&format!(
         "echo '{}' > /etc/timezone && ln -sf /usr/share/zoneinfo/{} /etc/localtime",
         locked_state.timezone, locked_state.timezone
     ))?;
     locked_state.progress.push("Locale set.".to_string());
 
-    // Install desktop
     match locked_state.desktop_env.as_str() {
         "kde" => chroot_cmd("apt install -y plasma-desktop")?,
         "gnome" => chroot_cmd("apt install -y gdm3 gnome-desktop")?,
         "hydra" => {
-            chroot_cmd("apt install -y plasma-desktop")?;
-            chroot_cmd("git clone https://github.com/HackerOS-Linux-System/hydra-look-and-feel.git /tmp/hydra-look-and-feel")?;
-            chroot_cmd("cp -r /tmp/hydra-look-and-feel/files/* /")?;
+            chroot_cmd("apt install -y plasma-desktop")?,
+            chroot_cmd("git clone https://github.com/HackerOS-Linux-System/hydra-look-and-feel.git /tmp/hydra-look-and-feel")?,
+            chroot_cmd("cp -r /tmp/hydra-look-and-feel/files/* /")?,
         }
         _ => {}
     }
     locked_state.progress.push("Desktop installed.".to_string());
 
-    // HackerOS-Steam create
     chroot_cmd("HackerOS-Steam create")?;
     locked_state.progress.push("HackerOS-Steam created.".to_string());
 
-    // Gamescope
     chroot_cmd("git clone https://github.com/HackerOS-Linux-System/gamescope-session-steam.git /tmp/gamescope-session-steam")?;
     chroot_cmd("hl run /tmp/gamescope-session-steam/unpack.hacker")?;
     locked_state.progress.push("Gamescope installed.".to_string());
 
-    // Copy icons
     chroot_cmd("cp -r /usr/share/HackerOS/Archived/icons/ /usr/share/")?;
     chroot_cmd("rm -rf /usr/share/HackerOS/Archived/icons/")?;
     locked_state.progress.push("Icons copied.".to_string());
@@ -397,7 +382,6 @@ async fn perform_installation(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
     locked_state.current_step = InstallerStep::Finalize;
 
-    // Finalize: umount, etc.
     Command::new("umount").arg(&locked_state.mount_point).output()?;
     locked_state.progress.push("Installation finalized.".to_string());
     locked_state.current_step = InstallerStep::Done;
@@ -407,34 +391,30 @@ async fn perform_installation(state: Arc<Mutex<InstallerState>>) -> Result<()> {
 
 async fn detect_and_install_gpu(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
+    let mount_point = locked_state.mount_point.clone();
     let output = Command::new("lspci").output()?;
     let lspci_str = String::from_utf8_lossy(&output.stdout);
+    let chroot_cmd = move |cmd: &str| -> Result<()> {
+        Command::new("chroot")
+        .arg(&mount_point)
+        .arg("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()?;
+        Ok(())
+    };
     if lspci_str.contains("NVIDIA") {
         locked_state.gpu_type = "nvidia".to_string();
         locked_state.progress.push("Detected NVIDIA GPU.".to_string());
-        Command::new("chroot")
-            .arg(&locked_state.mount_point)
-            .arg("apt")
-            .args(&["install", "-y", "nvidia-driver", "nvidia-kernel-dkms", "nvidia-smi", "libnvidia-ml1", "nvidia-settings", "nvidia-cuda-mps"])
-            .output()?;
+        chroot_cmd("apt install -y nvidia-driver nvidia-kernel-dkms nvidia-smi libnvidia-ml1 nvidia-settings nvidia-cuda-mps")?;
     } else if lspci_str.contains("AMD") {
         locked_state.gpu_type = "amd".to_string();
         locked_state.progress.push("Detected AMD GPU.".to_string());
-        // Assume install amd drivers
-        Command::new("chroot")
-            .arg(&locked_state.mount_point)
-            .arg("apt")
-            .args(&["install", "-y", "firmware-amd-graphics"])
-            .output()?;
+        chroot_cmd("apt install -y firmware-amd-graphics")?;
     } else if lspci_str.contains("Intel") {
         locked_state.gpu_type = "intel".to_string();
         locked_state.progress.push("Detected Intel GPU.".to_string());
-        // Assume install intel drivers
-        Command::new("chroot")
-            .arg(&locked_state.mount_point)
-            .arg("apt")
-            .args(&["install", "-y", "intel-gpu-tools"])
-            .output()?;
+        chroot_cmd("apt install -y intel-gpu-tools")?;
     }
     locked_state.progress.push("GPU drivers installed.".to_string());
     Ok(())
@@ -442,35 +422,33 @@ async fn detect_and_install_gpu(state: Arc<Mutex<InstallerState>>) -> Result<()>
 
 async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
-    let kernel_file = format!("{}/usr/share/HackerOS/Archived/kernel.hacker", locked_state.mount_point);
+    let mount_point = locked_state.mount_point.clone();
+    let kernel_file = format!("{}/usr/share/HackerOS/Archived/kernel.hacker", &mount_point);
     let content = fs::read_to_string(&kernel_file)?;
-    let lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<String> = content.lines().map(|l| l.trim().to_string()).collect();
 
-    let chroot_cmd = |cmd: &str| -> Result<()> {
-        Command::new("chroot")
-            .arg(&locked_state.mount_point)
+    if lines.contains(&"[liquorix]".to_string()) {
+        locked_state.kernel_type = "liquorix".to_string();
+        let chroot_cmd = |cmd: &str| -> Result<()> {
+            Command::new("chroot")
+            .arg(&mount_point)
             .arg("sh")
             .arg("-c")
             .arg(cmd)
             .output()?;
-        Ok(())
-    };
-
-    if lines.contains(&"[ liquorix ]") {
-        locked_state.kernel_type = "liquorix".to_string();
+            Ok(())
+        };
         chroot_cmd("curl -s 'https://liquorix.net/install-liquorix.sh' | bash")?;
-        // Remove default kernel
         chroot_cmd("apt remove -y linux-image-*generic")?;
         chroot_cmd("update-grub")?;
-    } else if lines.contains(&"[ xanmod ]") {
+    } else if lines.contains(&"[xanmod]".to_string()) {
         locked_state.kernel_type = "xanmod".to_string();
-        // Download cpu file
+        let cpu_file_path = format!("{}/tmp/xanmod-cpu.hacker", &mount_point);
         Command::new("wget")
-            .args(&["-O", &format!("{}/tmp/xanmod-cpu.hacker", locked_state.mount_point), "https://github.com/HackerOS-Linux-System/Hacker-Lang/blob/main/hacker-packages/xanmod-cpu.hacker?raw=true"])
-            .output()?;
-        let cpu_file = format!("{}/tmp/xanmod-cpu.hacker", locked_state.mount_point);
-        let cpu_content = fs::read_to_string(&cpu_file)?;
-        
+        .args(&["-O", &cpu_file_path, "https://github.com/HackerOS-Linux-System/Hacker-Lang/blob/main/hacker-packages/xanmod-cpu.hacker?raw=true"])
+        .output()?;
+        let cpu_content = fs::read_to_string(&cpu_file_path)?;
+
         let variant = if cpu_content.contains("x86-64-v3") {
             "x64v3"
         } else if cpu_content.contains("x86-64-v2") {
@@ -481,11 +459,20 @@ async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
             "x64v3"
         };
 
+        let chroot_cmd = move |cmd: &str| -> Result<()> {
+            Command::new("chroot")
+            .arg(&mount_point)
+            .arg("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()?;
+            Ok(())
+        };
+
         chroot_cmd("wget -qO - https://dl.xanmod.org/archive.key | gpg --dearmor -vo /etc/apt/keyrings/xanmod-archive-keyring.gpg")?;
         chroot_cmd(&format!("echo 'deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org $(lsb_release -sc) main' | tee /etc/apt/sources.list.d/xanmod-release.list"))?;
         chroot_cmd("apt update")?;
         chroot_cmd(&format!("apt install -y linux-xanmod-lts-{}", variant))?;
-        // Remove default kernel
         chroot_cmd("apt remove -y linux-image-*generic")?;
         chroot_cmd("update-grub")?;
     }
