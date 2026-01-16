@@ -18,7 +18,6 @@ use std::{
     process::Command,
     sync::{Arc, Mutex},
 };
-
 #[derive(Clone, PartialEq)]
 enum InstallerStep {
     Welcome,
@@ -33,7 +32,6 @@ enum InstallerStep {
     Finalize,
     Done,
 }
-
 #[derive(Clone)]
 struct InstallerState {
     current_step: InstallerStep,
@@ -50,7 +48,6 @@ struct InstallerState {
     kernel_type: String,
     progress: Vec<String>,
 }
-
 impl Default for InstallerState {
     fn default() -> Self {
         InstallerState {
@@ -70,24 +67,19 @@ impl Default for InstallerState {
         }
     }
 }
-
 enum MainContent<'a> {
     Paragraph(Paragraph<'a>),
     List(List<'a>),
 }
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(InstallerState::default()));
-
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let res = run_app(&mut terminal, state.clone()).await;
-
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -95,14 +87,11 @@ async fn main() -> Result<()> {
              DisableMouseCapture
     )?;
     terminal.show_cursor()?;
-
     if let Err(err) = res {
         println!("{:?}", err)
     }
-
     Ok(())
 }
-
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     state: Arc<Mutex<InstallerState>>,
@@ -110,7 +99,6 @@ async fn run_app<B: Backend>(
     let mut list_state = ListState::default();
     loop {
         terminal.draw(|f| ui(f, &state.lock().unwrap(), &mut list_state))?;
-
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 handle_key_event(key.code, state.clone(), &mut list_state).await?;
@@ -122,18 +110,15 @@ async fn run_app<B: Backend>(
         }
     }
 }
-
 fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut ListState) {
     let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
     .split(f.size());
-
     let main_block = Block::default()
     .title("HackerOS Installer")
     .borders(Borders::ALL);
     let progress_block = Block::default().title("Progress").borders(Borders::ALL);
-
     let main_content = match state.current_step {
         InstallerStep::Welcome => MainContent::Paragraph(Paragraph::new(Text::from("Welcome to HackerOS Installer. Press Enter to start."))
         .wrap(Wrap::default())),
@@ -171,10 +156,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut Lis
         InstallerStep::Finalize => MainContent::Paragraph(Paragraph::new(Text::from("Finalizing installation..."))),
         InstallerStep::Done => MainContent::Paragraph(Paragraph::new(Text::from("Installation complete. Reboot."))),
     };
-
     f.render_widget(main_block.clone(), chunks[0]);
     let inner_area = main_block.inner(chunks[0]);
-
     if state.current_step == InstallerStep::SelectDesktop {
         list_state.select(Some(match state.desktop_env.as_str() {
             "kde" => 0,
@@ -183,7 +166,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut Lis
             _ => 0,
         }));
     }
-
     match main_content {
         MainContent::List(l) => {
             f.render_stateful_widget(l, inner_area, list_state);
@@ -192,7 +174,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut Lis
             f.render_widget(p, inner_area);
         }
     }
-
     let progress_items: Vec<ListItem> = state
     .progress
     .iter()
@@ -203,7 +184,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, state: &InstallerState, list_state: &mut Lis
     let inner_progress = progress_block.inner(chunks[1]);
     f.render_widget(progress_list, inner_progress);
 }
-
 async fn handle_key_event(
     code: KeyCode,
     state: Arc<Mutex<InstallerState>>,
@@ -284,7 +264,6 @@ async fn handle_key_event(
     }
     Ok(())
 }
-
 fn perform_partitioning(state: &mut InstallerState) -> Result<()> {
     state.progress.push("Partitioning disk...".to_string());
     if state.auto_partition {
@@ -307,24 +286,20 @@ fn perform_partitioning(state: &mut InstallerState) -> Result<()> {
     state.progress.push("Disk mounted.".to_string());
     Ok(())
 }
-
 fn configure_network(state: &mut InstallerState) -> Result<()> {
     Command::new("dhclient").output()?;
     state.network_configured = true;
     state.progress.push("Network configured.".to_string());
     Ok(())
 }
-
 async fn perform_installation(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
     locked_state.progress.push("Starting installation...".to_string());
     let mount_point = locked_state.mount_point.clone();
-
     Command::new("rsync")
     .args(&["-aAXv", "--exclude=/dev/*", "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/tmp/*", "--exclude=/run/*", "--exclude=/mnt/*", "--exclude=/media/*", "--exclude=/lost+found", "/", &mount_point])
     .output()?;
     locked_state.progress.push("Base system copied.".to_string());
-
     let chroot_cmd = move |cmd: &str| -> Result<()> {
         Command::new("chroot")
         .arg(&mount_point)
@@ -334,61 +309,49 @@ async fn perform_installation(state: Arc<Mutex<InstallerState>>) -> Result<()> {
         .output()?;
         Ok(())
     };
-
     chroot_cmd(&format!(
         "useradd -m {} && echo '{}:{}' | chpasswd",
         locked_state.username, locked_state.username, locked_state.password
     ))?;
     locked_state.progress.push("User created.".to_string());
-
     chroot_cmd(&format!(
         "echo '{}' > /etc/timezone && ln -sf /usr/share/zoneinfo/{} /etc/localtime",
         locked_state.timezone, locked_state.timezone
     ))?;
     locked_state.progress.push("Locale set.".to_string());
-
     match locked_state.desktop_env.as_str() {
         "kde" => chroot_cmd("apt install -y plasma-desktop")?,
         "gnome" => chroot_cmd("apt install -y gdm3 gnome-desktop")?,
         "hydra" => {
-            chroot_cmd("apt install -y plasma-desktop")?,
-            chroot_cmd("git clone https://github.com/HackerOS-Linux-System/hydra-look-and-feel.git /tmp/hydra-look-and-feel")?,
-            chroot_cmd("cp -r /tmp/hydra-look-and-feel/files/* /")?,
+            chroot_cmd("apt install -y plasma-desktop")?;
+            chroot_cmd("git clone https://github.com/HackerOS-Linux-System/hydra-look-and-feel.git /tmp/hydra-look-and-feel")?;
+            chroot_cmd("cp -r /tmp/hydra-look-and-feel/files/* /")?;
         }
         _ => {}
     }
     locked_state.progress.push("Desktop installed.".to_string());
-
     chroot_cmd("HackerOS-Steam create")?;
     locked_state.progress.push("HackerOS-Steam created.".to_string());
-
     chroot_cmd("git clone https://github.com/HackerOS-Linux-System/gamescope-session-steam.git /tmp/gamescope-session-steam")?;
     chroot_cmd("hl run /tmp/gamescope-session-steam/unpack.hacker")?;
     locked_state.progress.push("Gamescope installed.".to_string());
-
     chroot_cmd("cp -r /usr/share/HackerOS/Archived/icons/ /usr/share/")?;
     chroot_cmd("rm -rf /usr/share/HackerOS/Archived/icons/")?;
     locked_state.progress.push("Icons copied.".to_string());
-
     locked_state.current_step = InstallerStep::DetectGPU;
     drop(locked_state);
     detect_and_install_gpu(state.clone()).await?;
-
     let mut locked_state = state.lock().unwrap();
     locked_state.current_step = InstallerStep::InstallKernel;
     drop(locked_state);
     install_kernel(state.clone()).await?;
-
     let mut locked_state = state.lock().unwrap();
     locked_state.current_step = InstallerStep::Finalize;
-
     Command::new("umount").arg(&locked_state.mount_point).output()?;
     locked_state.progress.push("Installation finalized.".to_string());
     locked_state.current_step = InstallerStep::Done;
-
     Ok(())
 }
-
 async fn detect_and_install_gpu(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
     let mount_point = locked_state.mount_point.clone();
@@ -419,14 +382,12 @@ async fn detect_and_install_gpu(state: Arc<Mutex<InstallerState>>) -> Result<()>
     locked_state.progress.push("GPU drivers installed.".to_string());
     Ok(())
 }
-
 async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
     let mut locked_state = state.lock().unwrap();
     let mount_point = locked_state.mount_point.clone();
     let kernel_file = format!("{}/usr/share/HackerOS/Archived/kernel.hacker", &mount_point);
     let content = fs::read_to_string(&kernel_file)?;
     let lines: Vec<String> = content.lines().map(|l| l.trim().to_string()).collect();
-
     if lines.contains(&"[liquorix]".to_string()) {
         locked_state.kernel_type = "liquorix".to_string();
         let chroot_cmd = |cmd: &str| -> Result<()> {
@@ -448,7 +409,6 @@ async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
         .args(&["-O", &cpu_file_path, "https://github.com/HackerOS-Linux-System/Hacker-Lang/blob/main/hacker-packages/xanmod-cpu.hacker?raw=true"])
         .output()?;
         let cpu_content = fs::read_to_string(&cpu_file_path)?;
-
         let variant = if cpu_content.contains("x86-64-v3") {
             "x64v3"
         } else if cpu_content.contains("x86-64-v2") {
@@ -458,7 +418,6 @@ async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
         } else {
             "x64v3"
         };
-
         let chroot_cmd = move |cmd: &str| -> Result<()> {
             Command::new("chroot")
             .arg(&mount_point)
@@ -468,7 +427,6 @@ async fn install_kernel(state: Arc<Mutex<InstallerState>>) -> Result<()> {
             .output()?;
             Ok(())
         };
-
         chroot_cmd("wget -qO - https://dl.xanmod.org/archive.key | gpg --dearmor -vo /etc/apt/keyrings/xanmod-archive-keyring.gpg")?;
         chroot_cmd(&format!("echo 'deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org $(lsb_release -sc) main' | tee /etc/apt/sources.list.d/xanmod-release.list"))?;
         chroot_cmd("apt update")?;
