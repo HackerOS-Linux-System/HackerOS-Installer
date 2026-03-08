@@ -1,0 +1,103 @@
+# HackerOS Installer Configuration
+# This file controls installer behavior and edition-specific settings
+
+# Edition: "standard", "gaming", "minimal", "developer"
+edition: "standard"
+
+# Base distribution
+# "trixie" = Debian Stable (Trixie)
+# "testing" = Debian Testing (rolling)
+base: "trixie"
+
+# Distribution display name
+distro_name: "HackerOS"
+distro_version: "1.0"
+distro_codename: "Aurora"
+
+# Default locale settings
+default_locale: "en_US.UTF-8"
+default_timezone: "UTC"
+default_keyboard: "us"
+
+# Partitioning defaults
+# "auto" or "manual"
+default_partitioning: "auto"
+
+# Filesystem per edition:
+# gaming -> btrfs (with subvolumes for snapshotting)
+# standard/minimal/developer -> ext4
+# Can be overridden here:
+# filesystem_override: "ext4"
+
+# Gaming edition specific settings
+gaming:
+  filesystem: "btrfs"
+  btrfs_subvolumes:
+    - name: "@"
+      mountpoint: "/"
+    - name: "@home"
+      mountpoint: "/home"
+    - name: "@snapshots"
+      mountpoint: "/.snapshots"
+    - name: "@var_log"
+      mountpoint: "/var/log"
+  install_steam: true
+  install_lutris: true
+  install_wine: true
+  install_gamemode: true
+  install_mangohud: true
+
+# Standard edition
+standard:
+  filesystem: "ext4"
+  install_office: false
+  install_media_codecs: true
+
+# Developer edition
+developer:
+  filesystem: "ext4"
+  install_vscode: true
+  install_git: true
+  install_docker: true
+  install_nodejs: true
+  install_python: true
+
+# Minimal edition
+minimal:
+  filesystem: "ext4"
+  # Only base system, no extras
+
+# Network: require internet connection during install?
+# gaming edition always requires internet
+require_network: false
+
+# Backend socket path
+backend_socket: "/tmp/hackeros-installer.sock"
+
+# Log file path
+log_file: "/tmp/hackeros-installer.log"
+
+# Show advanced options to user?
+show_advanced: true
+
+# Allow editing sources.list after install?
+configure_apt_sources: true
+
+# Default desktop environment
+# "gnome", "kde", "xfce", "none"
+desktop_environment: "gnome"
+
+# Bootloader
+# "grub" (default), "systemd-boot"
+bootloader: "grub"
+
+# Swap configuration
+# "partition", "file", "zram", "none"
+swap_type: "zram"
+swap_size_gb: 4
+
+# Extra packages to install (space separated)
+extra_packages: ""
+
+# Post-install script (optional)
+# post_install_script: "/usr/lib/HackerOS/Installer/post-install.sh"
