@@ -1,0 +1,8 @@
+// cargo
+// flutter
+
+> cd source-code
+> flutter create .
+> flutter build linux
+> cd backend
+> cargo build --release
