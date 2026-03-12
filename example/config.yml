@@ -1,103 +1,129 @@
-# HackerOS Installer Configuration
-# This file controls installer behavior and edition-specific settings
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║          HackerOS Installer – Plik konfiguracyjny               ║
+# ║  /usr/lib/HackerOS/Installer/config.yml                         ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
-# Edition: "standard", "gaming", "minimal", "developer"
-edition: "standard"
+# ── Edycja ────────────────────────────────────────────────────────────────────
+# gaming   → BTRFS + subvolumes, gamescope-session-steam, distrobox+Arch+Steam
+# official → czysty system bazowy, brak dodatkowych pakietów
+edition: "gaming"
 
-# Base distribution
-# "trixie" = Debian Stable (Trixie)
-# "testing" = Debian Testing (rolling)
+# ── Baza systemu ─────────────────────────────────────────────────────────────
+# trixie → Debian 13 Trixie  (STABILNA gałąź)
+# forky  → Debian Testing    (ROLLING – kryptonim „forky")
 base: "trixie"
 
-# Distribution display name
-distro_name: "HackerOS"
-distro_version: "1.0"
-distro_codename: "Aurora"
+# ── Środowisko graficzne ─────────────────────────────────────────────────────
+# gaming → zawsze używa SDDM + gamescope-session-steam
+# official → gnome / kde / xfce / none
+desktop_environment: "kde"
 
-# Default locale settings
-default_locale: "en_US.UTF-8"
-default_timezone: "UTC"
-default_keyboard: "us"
+# ── Bootloader ───────────────────────────────────────────────────────────────
+bootloader: "grub"
 
-# Partitioning defaults
-# "auto" or "manual"
-default_partitioning: "auto"
+# ── Swap ─────────────────────────────────────────────────────────────────────
+# zram     → wirtualny swap w RAM (zalecane)
+# partition→ dedykowana partycja swap
+# file     → plik swap
+# none     → brak swap
+swap_type: "zram"
+swap_size_gb: 8
 
-# Filesystem per edition:
-# gaming -> btrfs (with subvolumes for snapshotting)
-# standard/minimal/developer -> ext4
-# Can be overridden here:
-# filesystem_override: "ext4"
+# ── Sieć ─────────────────────────────────────────────────────────────────────
+# gaming zawsze wymaga internetu (automatycznie, nie trzeba zmieniać)
+require_network: false
 
-# Gaming edition specific settings
+# ── Backend IPC ──────────────────────────────────────────────────────────────
+backend_socket: "/tmp/hackeros-installer.sock"
+log_file: "/tmp/hackeros-installer.log"
+
+# ── APT ──────────────────────────────────────────────────────────────────────
+configure_apt_sources: true
+
+# ── Dodatkowe pakiety (opcjonalne, oddzielone spacją) ────────────────────────
+extra_packages: ""
+
+# ── Skrypt po-instalacyjny (opcjonalny) ──────────────────────────────────────
+# post_install_script: "/usr/lib/HackerOS/Installer/post-install.sh"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  KONFIGURACJA EDYCJI GAMING
+# ════════════════════════════════════════════════════════════════════════════
 gaming:
   filesystem: "btrfs"
+
   btrfs_subvolumes:
     - name: "@"
       mountpoint: "/"
+      mount_options: "compress=zstd,noatime"
     - name: "@home"
       mountpoint: "/home"
+      mount_options: "compress=zstd,noatime"
     - name: "@snapshots"
       mountpoint: "/.snapshots"
+      mount_options: "compress=zstd,noatime"
     - name: "@var_log"
       mountpoint: "/var/log"
-  install_steam: true
-  install_lutris: true
-  install_wine: true
+      mount_options: "compress=zstd,noatime"
+    - name: "@var_cache"
+      mountpoint: "/var/cache"
+      mount_options: "compress=zstd,noatime"
+
+  # Repozytorium gamescope-session-steam
+  # Folder /usr z tego repo zostanie skopiowany do /
+  gamescope_session_repo: "https://github.com/HackerOS-Linux-System/gamescope-session-steam.git"
+
+  # Kontener Arch Linux przez distrobox
+  distrobox_container_name: "HackerOS-Steam"
+  distrobox_image: "archlinux:latest"
+
+  # Pakiety instalowane w kontenerze (multilib włączone automatycznie)
+  arch_packages:
+    - gamescope
+    - steam
+    - lib32-mesa
+    - lib32-vulkan-icd-loader
+    - lib32-alsa-lib
+    - lib32-gcc-libs
+    - lib32-gtk3
+    - lib32-libgcrypt
+    - lib32-libpulse
+    - lib32-libva
+    - lib32-libxml2
+    - lib32-nss
+    - lib32-openal
+    - lib32-sdl2
+    - lib32-vulkan-intel
+    - lib32-vulkan-radeon
+    - lib32-nvidia-utils
+    - lib32-libxss
+    - lib32-libgpg-error
+    - lib32-dbus
+    - lib32-vulkan-freedreno
+    - lib32-vulkan-nouveau
+    - lib32-vulkan-swrast
+    - lib32-vulkan-virtio
+    - noto-fonts
+    - ttf-bitstream-vera
+    - ttf-croscore
+    - ttf-dejavu
+    - ttf-droid
+    - ttf-ibm-plex
+    - ttf-liberation
+    - ttf-roboto
+
+  # Domyślna sesja SDDM
+  sddm_default_session: "/usr/share/wayland-sessions/gamescope-session-steam.desktop"
+
+  install_lutris:   true
+  install_wine:     true
   install_gamemode: true
   install_mangohud: true
 
-# Standard edition
-standard:
+
+# ════════════════════════════════════════════════════════════════════════════
+#  KONFIGURACJA EDYCJI OFFICIAL
+# ════════════════════════════════════════════════════════════════════════════
+official:
   filesystem: "ext4"
-  install_office: false
-  install_media_codecs: true
-
-# Developer edition
-developer:
-  filesystem: "ext4"
-  install_vscode: true
-  install_git: true
-  install_docker: true
-  install_nodejs: true
-  install_python: true
-
-# Minimal edition
-minimal:
-  filesystem: "ext4"
-  # Only base system, no extras
-
-# Network: require internet connection during install?
-# gaming edition always requires internet
-require_network: false
-
-# Backend socket path
-backend_socket: "/tmp/hackeros-installer.sock"
-
-# Log file path
-log_file: "/tmp/hackeros-installer.log"
-
-# Show advanced options to user?
-show_advanced: true
-
-# Allow editing sources.list after install?
-configure_apt_sources: true
-
-# Default desktop environment
-# "gnome", "kde", "xfce", "none"
-desktop_environment: "gnome"
-
-# Bootloader
-# "grub" (default), "systemd-boot"
-bootloader: "grub"
-
-# Swap configuration
-# "partition", "file", "zram", "none"
-swap_type: "zram"
-swap_size_gb: 4
-
-# Extra packages to install (space separated)
-extra_packages: ""
-
-# Post-install script (optional)
-# post_install_script: "/usr/lib/HackerOS/Installer/post-install.sh"
