@@ -1,1 +1,53 @@
+name: hackeros_installer
+description: HackerOS Installer – przyjazny instalator Linux
+version: 1.0.0+1
 
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI / animacje
+  flutter_animate:  ^4.3.0
+  shimmer:          ^3.0.0
+
+  # State management
+  flutter_riverpod: ^2.4.9
+
+  # Utility
+  collection:       ^1.18.0
+  intl:             ^0.19.0
+  path:             ^1.9.0
+
+  # Async
+  async:            ^2.11.0
+
+  # IPC: używamy dart:io Socket (Unix domain socket) – NIE potrzeba zewnętrznego pakietu
+  # unix_socket nie istnieje na pub.dev – USUNIĘTE
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+
+  fonts:
+    - family: Sora
+      fonts:
+        - asset: assets/fonts/Sora-Regular.ttf
+        - asset: assets/fonts/Sora-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Sora-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Sora-Bold.ttf
+          weight: 700
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700
