@@ -1,18 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart' show Icons, IconData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
 final backendServiceProvider = Provider<BackendService>((ref) => BackendService());
 
-// ─── Modele danych ────────────────────────────────────────────────────────────
+// ─── InstallerConfig ─────────────────────────────────────────────────────────
 
 class InstallerConfig {
   final String edition;
   final String base;
   final String desktopEnvironment;
+  final String bootloader;
   final String swapType;
   final int    swapSizeGb;
   final bool   requireNetwork;
@@ -22,6 +24,7 @@ class InstallerConfig {
     required this.edition,
     required this.base,
     required this.desktopEnvironment,
+    required this.bootloader,
     required this.swapType,
     required this.swapSizeGb,
     required this.requireNetwork,
@@ -32,19 +35,17 @@ class InstallerConfig {
     edition:             j['edition']               ?? 'gaming',
     base:                j['base']                  ?? 'trixie',
     desktopEnvironment:  j['desktop_environment']   ?? 'kde',
+    bootloader:          j['bootloader']            ?? 'grub',
     swapType:            j['swap_type']             ?? 'zram',
     swapSizeGb:          (j['swap_size_gb'] as num? ?? 8).toInt(),
     requireNetwork:      j['require_network']       ?? false,
     configureAptSources: j['configure_apt_sources'] ?? true,
   );
 
-  // ── Helpery ──────────────────────────────────────────────────────────────
-
-  bool get isGamingEdition   => edition == 'gaming';
-  bool get isOfficialEdition => edition == 'official';
-  bool get requiresNetwork   => requireNetwork || isGamingEdition;
-
-  String get filesystem => isGamingEdition ? 'btrfs' : 'ext4';
+  bool   get isGamingEdition   => edition == 'gaming';
+  bool   get isOfficialEdition => edition == 'official';
+  bool   get requiresNetwork   => requireNetwork || isGamingEdition;
+  String get filesystem        => isGamingEdition ? 'btrfs' : 'ext4';
 
   String get baseDisplayName {
     switch (base.toLowerCase()) {
@@ -55,14 +56,11 @@ class InstallerConfig {
     }
   }
 
-  String get editionDisplayName {
-    switch (edition.toLowerCase()) {
-      case 'gaming':  return 'Gaming Edition';
-      case 'official':return 'Official Edition';
-      default:        return edition;
-    }
-  }
+  String get editionDisplayName =>
+  edition == 'gaming' ? 'Gaming Edition' : 'Official Edition';
 }
+
+// ─── DiskInfo ─────────────────────────────────────────────────────────────────
 
 class DiskInfo {
   final String path, name, sizeHuman, model, diskType;
@@ -71,9 +69,8 @@ class DiskInfo {
   final List<PartitionInfoModel> partitions;
 
   const DiskInfo({
-    required this.path, required this.name,
-    required this.sizeHuman, required this.model,
-    required this.diskType, required this.sizeBytes,
+    required this.path, required this.name, required this.sizeHuman,
+    required this.model, required this.diskType, required this.sizeBytes,
     required this.removable, required this.partitions,
   });
 
@@ -88,17 +85,26 @@ class DiskInfo {
     partitions: (j['partitions'] as List<dynamic>? ?? [])
     .map((p) => PartitionInfoModel.fromJson(p as Map<String, dynamic>)).toList(),
   );
+
+  IconData get icon {
+    switch (diskType) {
+      case 'nvme': return Icons.memory_outlined;
+      case 'ssd':  return Icons.storage_rounded;
+      case 'usb':  return Icons.usb_rounded;
+      default:     return Icons.album_outlined;
+    }
+  }
 }
 
 class PartitionInfoModel {
   final String path, name, sizeHuman, filesystem;
   final String? mountpoint, label;
-  final int sizeBytes;
+  final int     sizeBytes;
 
   const PartitionInfoModel({
-    required this.path, required this.name,
-    required this.sizeHuman, required this.filesystem,
-    required this.sizeBytes, this.mountpoint, this.label,
+    required this.path, required this.name, required this.sizeHuman,
+    required this.filesystem, required this.sizeBytes,
+    this.mountpoint, this.label,
   });
 
   factory PartitionInfoModel.fromJson(Map<String, dynamic> j) => PartitionInfoModel(
@@ -112,51 +118,104 @@ class PartitionInfoModel {
   );
 }
 
-class WifiNetwork {
-  final String ssid, signal, security;
-  final bool   connected;
-
-  const WifiNetwork({
-    required this.ssid, required this.signal,
-    required this.security, required this.connected,
-  });
-
-  factory WifiNetwork.fromJson(Map<String, dynamic> j) => WifiNetwork(
-    ssid:      j['ssid']     ?? '',
-    signal:    j['signal']   ?? '',
-    security:  j['security'] ?? '',
-    connected: j['connected'] ?? false,
-  );
-}
+// ─── NetworkInterface ─────────────────────────────────────────────────────────
 
 class NetworkInterface {
-  final String name, type, state;
-  final String? ipAddress, macAddress;
+  final String  name, type, state;
+  final String? ipAddress, macAddress, ssid;
 
   const NetworkInterface({
-    required this.name, required this.type,
-    required this.state, this.ipAddress, this.macAddress,
+    required this.name, required this.type, required this.state,
+    this.ipAddress, this.macAddress, this.ssid,
   });
 
-  factory NetworkInterface.fromJson(Map<String, dynamic> j) => NetworkInterface(
-    name:       j['name']        ?? '',
-    type:       j['type']        ?? 'unknown',
-    state:      j['state']       ?? 'unknown',
-    ipAddress:  j['ip_address']  as String?,
-    macAddress: j['mac_address'] as String?,
-  );
+  factory NetworkInterface.fromJson(Map<String, dynamic> j) {
+    // Backend Rust zwraca: connected (bool) + interface_type (String)
+    // Normalizujemy do state (String) + type (String)
+    final connected = j['connected'] as bool? ?? false;
+    final stateStr  = j['state']     as String? ??
+    (connected ? 'connected' : 'disconnected');
+    final typeStr   = j['type']            as String? ??
+    j['interface_type'] as String? ?? 'ethernet';
+    return NetworkInterface(
+      name:       j['name']        ?? '',
+      type:       typeStr,
+      state:      stateStr,
+      ipAddress:  j['ip_address']  as String?,
+      macAddress: j['mac_address'] as String?,
+      ssid:       j['ssid']        as String?,
+    );
+  }
 
-  bool get isWifi     => type == 'wifi';
-  bool get isEthernet => type == 'ethernet';
+  bool get isWifi      => type == 'wifi';
+  bool get isEthernet  => type == 'ethernet';
   bool get isConnected => state == 'connected';
 }
 
+// ─── WifiNetwork ─────────────────────────────────────────────────────────────
+
+class WifiNetwork {
+  final String ssid, security;
+  final int    signal;
+  final bool   connected;
+
+  const WifiNetwork({
+    required this.ssid, required this.security,
+    required this.signal, required this.connected,
+  });
+
+  factory WifiNetwork.fromJson(Map<String, dynamic> j) => WifiNetwork(
+    ssid:      j['ssid']      ?? '',
+    security:  j['security']  ?? '',
+    signal:    (j['signal'] as num? ?? 0).toInt(),
+    connected: j['connected'] ?? false,
+  );
+
+  bool get isOpen => security.isEmpty || security.toLowerCase() == 'none';
+
+  int get signalBars {
+    if (signal >= 80) return 4;
+    if (signal >= 55) return 3;
+    if (signal >= 30) return 2;
+    return 1;
+  }
+}
+
+// ─── Locale / Timezone / Keyboard types ──────────────────────────────────────
+// Używane przez locale_screen.dart
+
+class LocaleInfo {
+  final String id, name;
+  const LocaleInfo({required this.id, required this.name});
+  factory LocaleInfo.fromJson(Map<String, dynamic> j) =>
+  LocaleInfo(id: j['id'] ?? '', name: j['name'] ?? '');
+}
+
+class TimezoneInfo {
+  final String id, region, city;
+  const TimezoneInfo({required this.id, required this.region, required this.city});
+  factory TimezoneInfo.fromJson(Map<String, dynamic> j) => TimezoneInfo(
+    id:     j['id']     ?? '',
+    region: j['region'] ?? '',
+    city:   j['city']   ?? '',
+  );
+}
+
+class KeyboardLayout {
+  final String id, name;
+  const KeyboardLayout({required this.id, required this.name});
+  factory KeyboardLayout.fromJson(Map<String, dynamic> j) =>
+  KeyboardLayout(id: j['id'] ?? '', name: j['name'] ?? '');
+}
+
+// ─── InstallProgress ─────────────────────────────────────────────────────────
+
 class InstallProgress {
-  final String phase, currentTask;
-  final int    percent;
+  final String       phase, currentTask;
+  final int          percent;
   final List<String> logLines;
-  final String? error;
-  final bool   completed, cancelled;
+  final String?      error;
+  final bool         completed, cancelled;
 
   const InstallProgress({
     required this.phase, required this.currentTask,
@@ -181,40 +240,34 @@ class InstallProgress {
   );
 }
 
+// ─── SystemInfo ───────────────────────────────────────────────────────────────
+
 class SystemInfo {
-  final String cpuModel, ramTotal, hostname, osName;
+  final String cpuModel, ramTotal, hostname;
   final bool   efi;
-  final List<String> timezones, locales;
 
   const SystemInfo({
     required this.cpuModel, required this.ramTotal,
-    required this.hostname, required this.osName,
-    required this.efi, this.timezones = const [], this.locales = const [],
+    required this.hostname, required this.efi,
   });
 
   factory SystemInfo.fromJson(Map<String, dynamic> j) => SystemInfo(
-    cpuModel:  j['cpu_model']  ?? 'Unknown CPU',
-    ramTotal:  j['ram_total']  ?? 'Unknown',
-    hostname:  j['hostname']   ?? 'hackeros',
-    osName:    j['os_name']    ?? 'HackerOS Live',
-    efi:       j['efi']        ?? false,
-    timezones: (j['timezones'] as List<dynamic>? ?? []).map((e) => e.toString()).toList(),
-    locales:   (j['locales']   as List<dynamic>? ?? []).map((e) => e.toString()).toList(),
+    cpuModel: j['cpu_model']       ?? 'Unknown CPU',
+    ramTotal: j['ram_total_human'] ?? 'Unknown',
+    hostname: j['hostname']        ?? 'hackeros',
+    efi:      j['is_efi']          ?? false,
   );
 }
 
 // ─── BackendService ───────────────────────────────────────────────────────────
-// Komunikacja przez Unix domain socket – używa tylko dart:io (bez dodatkowych pakietów)
 
 class BackendService {
   static const String _socketPath = '/tmp/hackeros-installer.sock';
 
-  Socket?      _socket;
-  final        _buf = StringBuffer();
-  final        _responseCtrl = StreamController<Map<String, dynamic>>.broadcast();
+  Socket?  _socket;
+  final    _buf = StringBuffer();
+  final    _responseCtrl = StreamController<Map<String, dynamic>>.broadcast();
   InstallerConfig? config;
-
-  // ── Połączenie ─────────────────────────────────────────────────────────────
 
   Future<bool> connect() async {
     try {
@@ -222,7 +275,11 @@ class BackendService {
         InternetAddress(_socketPath, type: InternetAddressType.unix), 0,
         timeout: const Duration(seconds: 3),
       );
-      _socket!.transform(utf8.decoder).listen(_onData, onError: _onError, onDone: _onDone);
+      // FIX: cast do Stream<List<int>> przed transform(utf8.decoder)
+      _socket!
+      .cast<List<int>>()
+      .transform(utf8.decoder)
+      .listen(_onData, onError: _onError, onDone: _onDone);
       final pong = await _send({'action': 'Ping'});
       return pong['success'] == true;
     } catch (_) {
@@ -249,7 +306,7 @@ class BackendService {
     if (_socket == null) throw Exception('Brak połączenia z backendem');
     _socket!.write(jsonEncode(req) + '\n');
     final c = Completer<Map<String, dynamic>>();
-    late StreamSubscription sub;
+    late StreamSubscription<Map<String, dynamic>> sub;
     sub = _responseCtrl.stream.listen((r) {
       if (!c.isCompleted) { c.complete(r); sub.cancel(); }
     });
@@ -259,7 +316,16 @@ class BackendService {
     });
   }
 
-  // ── API ─────────────────────────────────────────────────────────────────────
+  /// Pyta backend (root) czy jest internet – używa ping/curl po stronie systemu.
+  /// Dokładniejsze niż TCP z poziomu Dart (działa nawet gdy Flutter jest sandboxowany).
+  Future<bool> checkInternet() async {
+    try {
+      final r = await _send({'action': 'CheckInternet'});
+      return r['data']?['connected'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> loadConfig() async {
     try {
@@ -302,9 +368,9 @@ class BackendService {
     return [];
   }
 
-  Future<List<WifiNetwork>> getWifiNetworks(String interface) async {
+  Future<List<WifiNetwork>> getWifiNetworks(String iface) async {
     try {
-      final r = await _send({'action': 'GetWifiNetworks', 'data': {'interface': interface}});
+      final r = await _send({'action': 'GetWifiNetworks', 'data': {'interface': iface}});
       if (r['success'] == true && r['data'] != null) {
         return (r['data'] as List<dynamic>)
         .map((n) => WifiNetwork.fromJson(n as Map<String, dynamic>)).toList();
@@ -313,47 +379,53 @@ class BackendService {
     return [];
   }
 
-  Future<bool> connectWifi(String interface, String ssid, {String? password}) async {
+  Future<bool> connectWifi(String iface, String ssid, {String? password}) async {
     try {
       final r = await _send({'action': 'ConnectWifi', 'data': {
-        'interface': interface, 'ssid': ssid, 'password': password,
+        'interface': iface, 'ssid': ssid, 'password': password,
       }});
       return r['success'] == true;
     } catch (_) { return false; }
   }
 
-  Future<bool> connectEthernet(String interface) async {
+  Future<bool> connectEthernet(String iface) async {
     try {
-      final r = await _send({'action': 'ConnectEthernet', 'data': {'interface': interface}});
+      final r = await _send({'action': 'ConnectEthernet', 'data': {'interface': iface}});
       return r['success'] == true;
     } catch (_) { return false; }
   }
 
-  Future<List<String>> getTimezones() async {
-    try {
-      final r = await _send({'action': 'GetTimezones'});
-      if (r['success'] == true && r['data'] != null) {
-        return (r['data'] as List<dynamic>).map((e) => e.toString()).toList();
-      }
-    } catch (_) {}
-    return [];
-  }
-
-  Future<List<String>> getLocales() async {
+  /// FIX: zwraca List<LocaleInfo> (nie List<dynamic>)
+  Future<List<LocaleInfo>> getLocales() async {
     try {
       final r = await _send({'action': 'GetLocales'});
       if (r['success'] == true && r['data'] != null) {
-        return (r['data'] as List<dynamic>).map((e) => e.toString()).toList();
+        return (r['data'] as List<dynamic>)
+        .map((e) => LocaleInfo.fromJson(e as Map<String, dynamic>)).toList();
       }
     } catch (_) {}
     return [];
   }
 
-  Future<List<String>> getKeyboardLayouts() async {
+  /// FIX: zwraca List<TimezoneInfo>
+  Future<List<TimezoneInfo>> getTimezones() async {
+    try {
+      final r = await _send({'action': 'GetTimezones'});
+      if (r['success'] == true && r['data'] != null) {
+        return (r['data'] as List<dynamic>)
+        .map((e) => TimezoneInfo.fromJson(e as Map<String, dynamic>)).toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  /// FIX: zwraca List<KeyboardLayout>
+  Future<List<KeyboardLayout>> getKeyboardLayouts() async {
     try {
       final r = await _send({'action': 'GetKeyboardLayouts'});
       if (r['success'] == true && r['data'] != null) {
-        return (r['data'] as List<dynamic>).map((e) => e.toString()).toList();
+        return (r['data'] as List<dynamic>)
+        .map((e) => KeyboardLayout.fromJson(e as Map<String, dynamic>)).toList();
       }
     } catch (_) {}
     return [];
@@ -380,14 +452,15 @@ class BackendService {
     } catch (_) { return false; }
   }
 
-  Future<InstallProgress> getInstallProgress() async {
+  /// FIX: zwraca InstallProgress? (nullable) – install_screen sprawdza != null
+  Future<InstallProgress?> getInstallProgress() async {
     try {
       final r = await _send({'action': 'GetInstallProgress'});
       if (r['success'] == true && r['data'] != null) {
         return InstallProgress.fromJson(r['data'] as Map<String, dynamic>);
       }
     } catch (_) {}
-    return InstallProgress.initial();
+    return null;
   }
 
   Future<void> cancelInstallation() async {
