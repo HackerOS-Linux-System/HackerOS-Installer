@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 #[serde(tag = "action", content = "data")]
 pub enum IpcRequest {
     Ping,
+    CheckInternet,
     GetConfig,
     GetSystemInfo,
     GetDisks,
@@ -124,6 +125,11 @@ async fn handle_client(stream: UnixStream, state: Arc<Mutex<AppState>>) -> Resul
 async fn handle_request(req: IpcRequest, state: &Arc<Mutex<AppState>>) -> IpcResponse {
     match req {
         IpcRequest::Ping => IpcResponse::ok(serde_json::json!({ "pong": true })),
+
+        IpcRequest::CheckInternet => {
+            let ok = crate::network::check_internet().await;
+            IpcResponse::ok(serde_json::json!({ "connected": ok }))
+        }
 
         IpcRequest::GetConfig => {
             let st = state.lock().await;
