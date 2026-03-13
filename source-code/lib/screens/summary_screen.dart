@@ -1,4 +1,3 @@
-// summary_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../theme/app_theme.dart';
@@ -11,119 +10,95 @@ class SummaryScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(installerProvider);
+    final state  = ref.watch(installerProvider);
     final config = state.config;
 
     return StepContainer(
-      title: 'Summary',
-      subtitle: 'Review your choices before installation begins.',
+      title:    'Podsumowanie',
+      subtitle: 'Sprawdź konfigurację przed instalacją.',
       footer: NavButtons(
         onBack: () => ref.read(installerProvider.notifier).prevStep(),
         onNext: () async {
-          // Send all configs to backend then start
           final backend = ref.read(backendServiceProvider);
-
           if (state.partitionPlan != null) {
             await backend.setPartitionPlan(state.partitionPlan!);
           }
-
           await backend.setUserConfig({
-            'full_name': state.fullName,
-            'username': state.username,
-            'password': state.password,
-            'hostname': state.hostname,
+            'full_name': state.fullName   ?? '',
+            'username':  state.username   ?? '',
+            'password':  state.password   ?? '',
+            'hostname':  state.hostname   ?? 'hackeros',
             'autologin': state.autologin,
             'root_password': null,
             'use_same_password_for_root': true,
           });
-
           ref.read(installerProvider.notifier).nextStep();
         },
-        nextLabel: 'Install Now',
+        nextLabel: 'Zainstaluj teraz',
         nextColor: AppTheme.accentDanger,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // System
-          const SectionHeader(title: 'System'),
-          _SummaryCard(
-            icon: Icons.computer_outlined,
-            items: [
-              ('Edition', config?.edition.toUpperCase() ?? '—'),
-              ('Base', _baseDisplayName(config?.base ?? 'trixie')),
-              ('Desktop', config?.desktopEnvironment.toUpperCase() ?? '—'),
-              ('Bootloader', config?.bootloader.toUpperCase() ?? '—'),
-            ],
-          ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-          const SizedBox(height: 16),
-          const SectionHeader(title: 'Language & Region'),
-          _SummaryCard(
-            icon: Icons.language_rounded,
-            items: [
-              ('Locale', state.selectedLocale),
-              ('Timezone', state.selectedTimezone),
-              ('Keyboard', state.selectedKeyboard.toUpperCase()),
-            ],
-          ),
+        const SectionHeader(title: 'System'),
+        _SummaryCard(icon: Icons.computer_outlined, items: [
+          ('Edycja',     config?.editionDisplayName ?? '—'),
+          ('Baza',       _baseDisplayName(config?.base ?? 'trixie')),
+          ('Pulpit',     config?.desktopEnvironment.toUpperCase() ?? '—'),
+          // FIX: config.bootloader istnieje w InstallerConfig
+          ('Bootloader', config?.bootloader.toUpperCase() ?? '—'),
+        ]),
 
-          const SizedBox(height: 16),
-          const SectionHeader(title: 'Storage'),
-          _SummaryCard(
-            icon: Icons.storage_rounded,
-            items: [
-              ('Disk', state.selectedDisk?.path ?? '—'),
-              ('Model', state.selectedDisk?.model ?? '—'),
-              ('Size', state.selectedDisk?.sizeHuman ?? '—'),
-              ('Filesystem', _editionFilesystem(config?.edition ?? 'standard')),
-              ('Swap', '${config?.swapType?.toUpperCase() ?? 'ZRAM'} (${config?.swapSizeGb ?? 4} GB)'),
-            ],
-          ),
+        const SizedBox(height: 16),
+        const SectionHeader(title: 'Język i region'),
+        _SummaryCard(icon: Icons.language_rounded, items: [
+          // FIX: String? → użyj ?? '—'
+          ('Locale',   state.selectedLocale   ?? '—'),
+          ('Strefa',   state.selectedTimezone ?? '—'),
+          ('Klawiatura', (state.selectedKeyboard ?? '—').toUpperCase()),
+        ]),
 
-          const SizedBox(height: 16),
-          const SectionHeader(title: 'User Account'),
-          _SummaryCard(
-            icon: Icons.person_outline_rounded,
-            items: [
-              ('Full Name', state.fullName),
-              ('Username', state.username),
-              ('Hostname', state.hostname),
-              ('Auto-login', state.autologin ? 'Yes' : 'No'),
-            ],
-          ),
+        const SizedBox(height: 16),
+        const SectionHeader(title: 'Dysk'),
+        _SummaryCard(icon: Icons.storage_rounded, items: [
+          ('Dysk',      state.selectedDisk?.path     ?? '—'),
+          ('Model',     state.selectedDisk?.model    ?? '—'),
+          ('Rozmiar',   state.selectedDisk?.sizeHuman ?? '—'),
+          ('FS',        _editionFs(config?.edition   ?? 'official')),
+          ('Swap',      '${(config?.swapType ?? 'zram').toUpperCase()} (${config?.swapSizeGb ?? 8} GB)'),
+        ]),
 
-          const SizedBox(height: 20),
+        const SizedBox(height: 16),
+        const SectionHeader(title: 'Konto użytkownika'),
+        _SummaryCard(icon: Icons.person_outline_rounded, items: [
+          // FIX: String? → użyj ?? '—'
+          ('Imię i nazwisko', state.fullName  ?? '—'),
+          ('Nazwa użytkownika', state.username ?? '—'),
+          ('Hostname',   state.hostname ?? '—'),
+          ('Auto-login', state.autologin ? 'Tak' : 'Nie'),
+        ]),
 
-          // Final warning
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppTheme.accentDanger.withOpacity(0.08),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppTheme.accentDanger.withOpacity(0.25)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.info_outline_rounded, color: AppTheme.accentDanger, size: 20),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Clicking "Install Now" will start the installation. '
-                  'The disk ${state.selectedDisk?.path ?? ""} will be erased. '
-                  'This cannot be undone.',
-                  style: const TextStyle(
-                    fontFamily: 'Sora',
-                    fontSize: 13,
-                    color: AppTheme.accentDanger,
-                  ),
-                  ),
-                ),
-              ],
-            ),
+        const SizedBox(height: 20),
+
+        // Ostrzeżenie
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: AppTheme.accentDanger.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: AppTheme.accentDanger.withOpacity(0.25)),
           ),
-        ],
-      ),
+          child: Row(children: [
+            const Icon(Icons.warning_amber_rounded, color: AppTheme.accentDanger, size: 20),
+            const SizedBox(width: 12),
+            Expanded(child: Text(
+              'Kliknięcie "Zainstaluj teraz" spowoduje trwałe usunięcie wszystkich danych '
+            'z dysku ${state.selectedDisk?.path ?? ""}. Tego nie można cofnąć.',
+            style: const TextStyle(fontFamily: 'Sora', fontSize: 13,
+                                   color: AppTheme.accentDanger),
+            )),
+          ]),
+        ),
+      ]),
     );
   }
 }
@@ -137,61 +112,40 @@ String _baseDisplayName(String base) {
   }
 }
 
-String _editionFilesystem(String edition) {
-  return edition.toLowerCase() == 'gaming' ? 'BTRFS (z subvolumes)' : 'EXT4';
-}
+String _editionFs(String edition) =>
+edition.toLowerCase() == 'gaming' ? 'BTRFS (z subvolumes)' : 'EXT4';
 
 class _SummaryCard extends StatelessWidget {
-  final IconData icon;
+  final IconData           icon;
   final List<(String, String)> items;
 
   const _SummaryCard({required this.icon, required this.items});
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppTheme.surfaceBorder),
-      ),
-      child: Column(
-        children: items.map((item) {
-          final isLast = item == items.last;
-          return Column(
-            children: [
-              Row(
-                children: [
-                  SizedBox(
-                    width: 130,
-                    child: Text(
-                      item.$1,
-                      style: const TextStyle(
-                        fontFamily: 'Sora',
-                        fontSize: 13,
-                        color: AppTheme.textMuted,
-                      ),
-                    ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      item.$2,
-                      style: const TextStyle(
-                        fontFamily: 'Sora',
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              if (!isLast) const Divider(color: AppTheme.surfaceBorder, height: 16),
-            ],
-          );
-        }).toList(),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: AppTheme.surface,
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: AppTheme.surfaceBorder),
+    ),
+    child: Column(
+      children: items.asMap().entries.map((e) {
+        final isLast = e.key == items.length - 1;
+        final item   = e.value;
+        return Column(children: [
+          Row(children: [
+            SizedBox(width: 140, child: Text(item.$1, style: const TextStyle(
+              fontFamily: 'Sora', fontSize: 13, color: AppTheme.textMuted,
+            ))),
+            Expanded(child: Text(item.$2, style: const TextStyle(
+              fontFamily: 'Sora', fontSize: 13, fontWeight: FontWeight.w600,
+              color: AppTheme.textPrimary,
+            ))),
+          ]),
+          if (!isLast) const Divider(color: AppTheme.surfaceBorder, height: 16),
+        ]);
+      }).toList(),
+    ),
+  );
 }
