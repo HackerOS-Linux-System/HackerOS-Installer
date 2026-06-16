@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "installer.h"
 
 /* ── global state ────────────────────────────────────────────────────── */
@@ -65,8 +66,8 @@ int main(void)
     /* must run as root */
     if (geteuid() != 0) {
         fprintf(stderr,
-                "\nHackerOS Installer must be run as root.\n"
-                "Try:  sudo hackeros-installer\n\n");
+            "\nHackerOS Installer must be run as root.\n"
+            "Try:  sudo hackeros-installer\n\n");
         return 1;
     }
 
@@ -84,7 +85,7 @@ int main(void)
         if (ret > 0) {
             /* forward */
             if (cur == SCREEN_FINISH) break; /* done */
-                cur++;
+            cur++;
         } else if (ret < 0) {
             /* back – don't go before LOCALE */
             if (cur > SCREEN_LOCALE) cur--;
@@ -96,8 +97,8 @@ int main(void)
 
     if (g_state.install_done) {
         printf("\n\033[1;32m"
-        "  HackerOS Server Edition installed successfully.\n"
-        "  Please reboot your system.\033[0m\n\n");
+               "  HackerOS Server Edition installed successfully.\n"
+               "  Please reboot your system.\033[0m\n\n");
         /* actual reboot */
         execlp("reboot", "reboot", NULL);
     }
