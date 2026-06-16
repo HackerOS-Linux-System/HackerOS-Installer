@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <time.h>
+#include <signal.h>
 
 /* ── Color pair IDs ─────────────────────────────────────────────────── */
 #define CP_NORMAL        1   /* white on black          */
