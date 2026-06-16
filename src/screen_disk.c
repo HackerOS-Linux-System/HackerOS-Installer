@@ -98,8 +98,8 @@ int screen_disk(void)
     for (int i = 0; i < n_disks; i++)
         if (!strcmp(disks[i].dev, g_state.disk_device)) { sel_disk = i; break; }
 
-        /* detect EFI */
-        g_state.use_efi = (access("/sys/firmware/efi", F_OK) == 0);
+    /* detect EFI */
+    g_state.use_efi = (access("/sys/firmware/efi", F_OK) == 0);
 
     while (1) {
         int rows, cols;
@@ -180,7 +180,8 @@ int screen_disk(void)
         if (sw_active) wattron(w, COLOR_PAIR(CP_STATUS) | A_BOLD);
         else           wattron(w, COLOR_PAIR(CP_NORMAL));
         mvwaddstr(w, 15, 2, "Create swap partition:");
-        wattroff(sw_active ? COLOR_PAIR(CP_STATUS) | A_BOLD : COLOR_PAIR(CP_NORMAL));
+        if (sw_active) wattroff(w, COLOR_PAIR(CP_STATUS) | A_BOLD);
+        else           wattroff(w, COLOR_PAIR(CP_NORMAL));
 
         if (sw_active) wattron(w, COLOR_PAIR(CP_SELECTED) | A_BOLD);
         else if (g_state.use_swap) wattron(w, COLOR_PAIR(CP_BORDER));
