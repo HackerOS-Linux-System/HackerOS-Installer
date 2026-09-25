@@ -1,1 +1,15 @@
+[package]
+-> name        => hackeros-installer-standard
+-> version     => 0.1.0
+-> description => Graficzny instalator HackerOS (Standard Edition). Napisany w 100% w Silver + H# — jedyna zależność to biblioteka `silver`, cała logika instalacji pochodzi z pakietu `main` (patrz -> include).
+-> author      => HackerOS Team
+-> license     => GPL-3.0
 
+[build]
+-> lang    => h#
+-> entry   => src/main.h#
+-> output  => build/hackeros-installer-standard
+-> include => ../main/src
+
+[deps]
+-> silver => v0.2
