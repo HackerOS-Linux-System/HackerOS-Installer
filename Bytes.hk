@@ -1,3 +1,10 @@
-|| H#
+[workspace]
+-> name        => hackeros-installer
+-> version     => 0.1.0
+-> mode        => standard
+-> members     => ["main", "standard", "server-edition"]
+-> build-order => ["main", "standard", "server-edition"]
 
-> bytes build --release
+[build]
+-> parallel => false
+-> cache    => build/cache/
