@@ -1,0 +1,134 @@
+mod model
+mod plan
+
+use "std -> process" from "process"
+use "std -> fs"       from "fs"
+use "std -> strings"  from "str"
+
+pub fn log_file_path() -> string is
+    return "/var/log/hackeros-installer.log"
+end
+
+;; Kroki zawierające `chpasswd` niosą hasło wprost w treści komendy —
+;; logujemy tylko etykietę, nigdy samo polecenie, dla takich kroków.
+;; `passwd -l root` (blokada konta) NIE niesie hasła, więc zostaje
+;; zalogowane normalnie.
+fn is_sensitive(cmd: string) -> bool is
+    return cmd.contains("chpasswd")
+end
+
+fn log_line(text: string) is
+    fs::append(log_file_path(), text + "\n")
+end
+
+fn log_step_start(s: plan::PlanStep) is
+    if is_sensitive(s.command) is
+        log_line("$ [ukryto polecenie zawierające hasło] — " + s.label)
+    else is
+        log_line("$ " + s.command)
+    end
+end
+
+fn log_step_result(ok: bool, indented_output: string) is
+    if ok is
+        log_line("  -> OK")
+    else is
+        log_line("  -> BŁĄD:")
+        log_line(indented_output)
+    end
+end
+
+;; Proste wcięcie każdej linii wyjścia polecenia o cztery spacje, żeby
+;; log pozostał czytelny.
+fn indent_output(s: string) -> string is
+    let lines: [string] = str::split(s, "\n")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < lines.len() is
+        out.push("    " + lines[i])
+        i += 1
+    end
+    return str::join(out, "\n")
+end
+
+;; Uruchamia jeden krok planu i zwraca jego wynik. `process::run`
+;; (patrz std/process.h#) zwraca tylko połączone stdout/stderr — bez
+;; osobnego kodu wyjścia — więc traktujemy krok jako nieudany, gdy
+;; wyjście zawiera oczywiste markery błędu powłoki. To uproszczenie
+;; (patrz komentarz w instalator_run poniżej); w praktyce każdy krok
+;; planu jest pojedynczym, prostym poleceniem, więc fałszywe trafienia
+;; są rzadkie, a `plan.h#` dobiera polecenia tak, by w normalnej pracy
+;; nigdy same z siebie nie wypisywały tekstu "command not found" ani
+;; "No such file or directory" na wyjściu standardowym w przypadku
+;; sukcesu.
+fn looks_like_failure(output: string) -> bool is
+    if output.contains("command not found") is return true end
+    if output.contains("No such file or directory") is return true end
+    if output.contains("cannot ") is return true end
+    if output.contains("Permission denied") is return true end
+    if output.contains("mkfs.") && output.contains("error") is return true end
+    return false
+end
+
+fn run_one(s: plan::PlanStep) -> model::InstallStepResult is
+    log_step_start(s)
+    let output: string = process::run(s.command + " 2>&1")
+    let ok: bool = !looks_like_failure(output)
+    log_step_result(ok, indent_output(output))
+    return model::InstallStepResult { label: s.label, ok: ok, message: if ok then "" else output }
+end
+
+pub fn run_install(cfg: model::InstallConfig, on_progress: fn(string, int, int)) -> model::InstallResult is
+    log_line("══════════════════════════════════════════════════")
+    log_line("HackerOS Installer — start instalacji (" + cfg.edition + " edition)")
+    log_line("Cel: " + cfg.target_disk + "  UEFI: " + to_string(cfg.uefi))
+    log_line("══════════════════════════════════════════════════")
+
+    let steps: [plan::PlanStep] = plan::full_plan(cfg)
+    let total: int = steps.len()
+
+    let mut results: [model::InstallStepResult] = []
+    let mut failed_label: string = ""
+    let mut i: int = 0
+
+    while i < total is
+        on_progress(steps[i].label, i, total)
+        let res: model::InstallStepResult = run_one(steps[i])
+        results.push(res)
+
+        if !res.ok is
+            failed_label = res.label
+            log_line("Instalacja przerwana na kroku: " + failed_label)
+            i = total   ;; przerywa pętlę — reszta planu nie jest wykonywana
+        else is
+            i += 1
+        end
+    end
+
+    let success: bool = failed_label == ""
+    if success is
+        log_line("Instalacja zakończona pomyślnie.")
+    end
+
+    return model::InstallResult {
+        success: success,
+        steps: results,
+        failed_label: failed_label,
+        log_path: log_file_path()
+    }
+end
+
+;; Podgląd planu bez wykonywania niczego — używane przez ekran Summary
+;; w obu interfejsach, żeby pokazać użytkownikowi dokładnie, ile kroków
+;; i jakiego rodzaju zostanie wykonanych, zanim cokolwiek nieodwracalne
+;; się wydarzy.
+pub fn preview_plan(cfg: model::InstallConfig) -> [string] is
+    let steps: [plan::PlanStep] = plan::full_plan(cfg)
+    let mut labels: [string] = []
+    let mut i: int = 0
+    while i < steps.len() is
+        labels.push(steps[i].label)
+        i += 1
+    end
+    return labels
+end
