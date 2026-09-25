@@ -1,0 +1,57 @@
+pub fn locale_codes() -> [string] is
+    return [
+        "en_US.UTF-8", "pl_PL.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8",
+        "es_ES.UTF-8", "it_IT.UTF-8", "pt_BR.UTF-8", "ru_RU.UTF-8",
+        "uk_UA.UTF-8", "ja_JP.UTF-8", "zh_CN.UTF-8"
+    ]
+end
+
+pub fn locale_labels() -> [string] is
+    return [
+        "English (US)", "Polski", "Deutsch", "Français",
+        "Español", "Italiano", "Português (Brasil)", "Русский",
+        "Українська", "日本語", "中文（简体）"
+    ]
+end
+
+pub fn keyboard_codes() -> [string] is
+    return ["us", "pl", "de", "fr", "es", "it", "pt", "ru", "ua", "jp"]
+end
+
+pub fn keyboard_labels() -> [string] is
+    return [
+        "US (QWERTY)", "Polski (programisty)", "Deutsch (QWERTZ)",
+        "Français (AZERTY)", "Español", "Italiano", "Português",
+        "Русский", "Українська", "日本語"
+    ]
+end
+
+pub fn timezone_codes() -> [string] is
+    return [
+        "UTC", "Europe/Warsaw", "Europe/London", "Europe/Berlin",
+        "Europe/Paris", "Europe/Madrid", "Europe/Rome", "Europe/Moscow",
+        "Europe/Kyiv", "America/New_York", "America/Chicago",
+        "America/Los_Angeles", "America/Sao_Paulo", "Asia/Tokyo",
+        "Asia/Shanghai", "Australia/Sydney"
+    ]
+end
+
+pub fn timezone_labels() -> [string] is
+    return [
+        "UTC", "Warszawa", "Londyn", "Berlin", "Paryż", "Madryt",
+        "Rzym", "Moskwa", "Kijów", "Nowy Jork", "Chicago",
+        "Los Angeles", "São Paulo", "Tokio", "Szanghaj", "Sydney"
+    ]
+end
+
+;; Etykieta dla dowolnego kodu z powyższych list — a jeśli kod nie
+;; występuje na liście (użytkownik wpisał własny w polu "Inne"), zwraca
+;; sam kod, żeby UI zawsze miało co wyświetlić.
+pub fn label_for(codes: [string], labels: [string], code: string) -> string is
+    let mut i: int = 0
+    while i < codes.len() is
+        if codes[i] == code is return labels[i] end
+        i += 1
+    end
+    return code
+end
