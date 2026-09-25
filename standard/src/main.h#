@@ -1,0 +1,431 @@
+use "silver -> app" from "app"
+use "std -> sync"    from "sync"
+use "std -> strings"  from "str"
+use "std -> process"  from "process"
+
+mod model
+mod steps
+mod system_scan
+mod locales
+mod validate
+mod installer_run
+mod config_io
+
+;; ── stałe ────────────────────────────────────────────────────────────
+
+fn locale_count() -> int   is return locales::locale_codes().len() end
+fn keyboard_count() -> int is return locales::keyboard_codes().len() end
+fn timezone_count() -> int is return locales::timezone_codes().len() end
+fn max_disk_slots() -> int is return 6 end   ;; patrz komentarz w render_disk()
+
+fn b2i(b: bool) -> int is if b then return 1 end return 0 end
+fn i2b(i: int) -> bool is return i == 1 end
+
+fn html_escape(s: string) -> string is
+    let mut out: string = s
+    out = str::replace_all(out, "&", "&amp;")
+    out = str::replace_all(out, "<", "&lt;")
+    out = str::replace_all(out, ">", "&gt;")
+    out = str::replace_all(out, "\"", "&quot;")
+    return out
+end
+
+;; ── handlery on-click (tylko flagi/atomiki — patrz komentarz u góry) ─
+
+fn go_next(args: string) -> string is sync::atomic_store("want_next", 1) return "{}" end
+fn go_prev(args: string) -> string is sync::atomic_store("want_prev", 1) return "{}" end
+
+;; Jedyne dwa handlery do WSZYSTKICH list wyboru (język/klawiatura/
+;; strefa/dysk) — który atomik zmienić, `cycle()` odczytuje z atomika
+;; "step", więc nie trzeba osobnego handlera na każdą z ~40 pozycji
+;; list z locales.h# (odpowiednik strzałek ↑/↓ w server-edition/tui).
+fn cycle(delta: int) is
+    let st: int = sync::atomic_load("step")
+    if st == steps::step_index(model::Step::Language) is
+        let n: int = locale_count()
+        let cur: int = sync::atomic_load("locale_idx")
+        sync::atomic_store("locale_idx", ((cur + delta) % n + n) % n)
+    elsif st == steps::step_index(model::Step::Keyboard) is
+        let n: int = keyboard_count()
+        let cur: int = sync::atomic_load("keyboard_idx")
+        sync::atomic_store("keyboard_idx", ((cur + delta) % n + n) % n)
+    elsif st == steps::step_index(model::Step::Timezone) is
+        let n: int = timezone_count()
+        let cur: int = sync::atomic_load("timezone_idx")
+        sync::atomic_store("timezone_idx", ((cur + delta) % n + n) % n)
+    elsif st == steps::step_index(model::Step::Disk) is
+        let n: int = sync::atomic_load("disk_count")
+        if n > 0 is
+            let cur: int = sync::atomic_load("disk_idx")
+            if cur < 0 is
+                sync::atomic_store("disk_idx", 0)
+            else is
+                sync::atomic_store("disk_idx", ((cur + delta) % n + n) % n)
+            end
+        end
+    end
+end
+
+fn cycle_next(args: string) -> string is cycle(1)  return "{}" end
+fn cycle_prev(args: string) -> string is cycle(-1) return "{}" end
+
+fn toggle_fs(args: string) -> string is
+    sync::atomic_store("fs_btrfs", 1 - sync::atomic_load("fs_btrfs"))
+    return "{}"
+end
+
+fn toggle_swap(args: string) -> string is
+    sync::atomic_store("swap_on", 1 - sync::atomic_load("swap_on"))
+    return "{}"
+end
+
+fn toggle_admin(args: string) -> string is
+    sync::atomic_store("admin_on", 1 - sync::atomic_load("admin_on"))
+    return "{}"
+end
+
+fn toggle_accept(args: string) -> string is
+    sync::atomic_store("accepted", 1 - sync::atomic_load("accepted"))
+    return "{}"
+end
+
+fn do_reboot(args: string) -> string is
+    process::run("reboot")
+    return "{}"
+end
+
+;; ── budowanie InstallConfig z bieżącego stanu ────────────────────────
+
+fn build_cfg(a: app::App) -> model::InstallConfig is
+    let mut cfg: model::InstallConfig = model::default_config("standard")
+    cfg.step = steps::step_from_index(sync::atomic_load("step"))
+
+    cfg.locale   = locales::locale_codes()[sync::atomic_load("locale_idx")]
+    cfg.keyboard = locales::keyboard_codes()[sync::atomic_load("keyboard_idx")]
+    cfg.timezone = locales::timezone_codes()[sync::atomic_load("timezone_idx")]
+
+    let disks: [model::Disk] = system_scan::detect_disks()
+    let d_idx: int = sync::atomic_load("disk_idx")
+    if d_idx >= 0 && d_idx < disks.len() is
+        cfg.target_disk = disks[d_idx].device
+    end
+    cfg.erase_disk = true
+
+    cfg.filesystem  = if i2b(sync::atomic_load("fs_btrfs")) then "btrfs" else "ext4"
+    cfg.enable_swap = i2b(sync::atomic_load("swap_on"))
+    cfg.swap_size_mb = 2048
+
+    let hostname_in: string = app::input_value(a, "hostname")
+    cfg.hostname = if hostname_in == "" then "hackeros" else hostname_in
+
+    cfg.user.username  = app::input_value(a, "username")
+    cfg.user.full_name = app::input_value(a, "fullname")
+    cfg.user.password  = app::input_value(a, "password")
+    cfg.user.is_admin  = i2b(sync::atomic_load("admin_on"))
+    cfg.root_password  = ""   ;; brak osobnego pola w GUI v0.1 — root zostaje zablokowany, patrz plan::account_steps
+
+    cfg.uefi = i2b(sync::atomic_load("uefi"))
+    cfg.accepted_summary = i2b(sync::atomic_load("accepted"))
+
+    return cfg
+end
+
+;; ── uruchomienie instalacji właściwej (synchronicznie, patrz nagłówek) ─
+
+fn noop_progress(label: string, idx: int, total: int) is
+    ;; Bez wątków nie da się tu odświeżyć okna w trakcie działania —
+    ;; patrz komentarz na górze pliku. Wynik i tak trafia na ekran Done.
+end
+
+fn run_and_finish(app_in: app::App, cfg: model::InstallConfig) -> app::App is
+    let mut a: app::App = app_in
+    sync::atomic_store("step", steps::step_index(model::Step::Installing))
+
+    let result: model::InstallResult = installer_run::run_install(cfg, noop_progress)
+
+    sync::atomic_store("install_done", 1)
+    sync::atomic_store("install_ok", b2i(result.success))
+    sync::atomic_store("step", steps::step_index(model::Step::Done))
+
+    let mut lines: string = ""
+    let mut i: int = 0
+    while i < result.steps.len() is
+        let s: model::InstallStepResult = result.steps[i]
+        let prefix: string = if s.ok then "OK   " else "BŁĄD "
+        lines = lines + prefix + s.label + "\n"
+        i += 1
+    end
+    a = app::set_state(a, "result_lines", lines)
+    a = app::set_state(a, "result_log", result.log_path)
+    return a
+end
+
+;; ── on_tick: cała logika + przerysowanie ekranu ─────────────────────
+
+fn tick(app_in: app::App) -> app::App is
+    let mut a: app::App = app_in
+    let mut error_msg: string = app::state(a, "error_msg")
+
+    if sync::atomic_load("want_prev") == 1 is
+        sync::atomic_store("want_prev", 0)
+        let cur: model::Step = steps::step_from_index(sync::atomic_load("step"))
+        if steps::can_go_back(cur) is
+            sync::atomic_store("step", steps::step_index(steps::prev_step(cur)))
+            error_msg = ""
+        end
+    end
+
+    if sync::atomic_load("want_next") == 1 is
+        sync::atomic_store("want_next", 0)
+        let cfg: model::InstallConfig = build_cfg(a)
+        let v: validate::ValidationResult = validate::validate_step(cfg)
+        if !v.ok is
+            error_msg = v.message
+        else is
+            error_msg = ""
+            if cfg.step == model::Step::Summary is
+                a = run_and_finish(a, cfg)
+            else is
+                sync::atomic_store("step", steps::step_index(steps::next_step(cfg.step)))
+            end
+        end
+    end
+
+    a = app::set_state(a, "error_msg", error_msg)
+    let cur_cfg: model::InstallConfig = build_cfg(a)
+    a = app::load_html_str(a, render(a, cur_cfg, error_msg))
+    return a
+end
+
+;; ── render: HTML pełnej strony bieżącego kroku ──────────────────────
+
+fn step_dots(current: model::Step) -> string is
+    let cur_i: int = steps::step_index(current)
+    let mut out: string = "<div class=\"steps\">"
+    let mut i: int = 0
+    while i < steps::step_count() is
+        let cls: string = if i == cur_i then "step-dot active" elsif i < cur_i then "step-dot done" else "step-dot"
+        out = out + "<div class=\"" + cls + "\"></div>"
+        i += 1
+    end
+    out = out + "</div>"
+    return out
+end
+
+fn nav_row(cfg: model::InstallConfig, next_label: string) -> string is
+    let mut out: string = "<div class=\"row\">"
+    if steps::can_go_back(cfg.step) is
+        out = out + "<div class=\"btn ghost\" on-click=\"go_prev\"><span>Wstecz</span></div>"
+    end
+    if steps::can_go_next(cfg.step) is
+        out = out + "<div class=\"btn primary\" on-click=\"go_next\"><span>" + next_label + "</span></div>"
+    end
+    out = out + "</div>"
+    return out
+end
+
+fn cycler_block(label: string, index: int, total: int) -> string is
+    return
+        "<div class=\"row\">" +
+            "<div class=\"btn ghost\" on-click=\"cycle_prev\"><span>&lt;</span></div>" +
+            "<div class=\"option selected\"><span>" + html_escape(label) + "</span></div>" +
+            "<div class=\"btn ghost\" on-click=\"cycle_next\"><span>&gt;</span></div>" +
+        "</div>" +
+        "<p class=\"muted\">" + to_string(index + 1) + " / " + to_string(total) + "</p>"
+end
+
+fn render_welcome() -> string is
+    return
+        "<h1>Witaj w instalatorze HackerOS</h1>" +
+        "<p>Ten kreator przeprowadzi Cię przez instalację HackerOS (Standard Edition) na tym komputerze.</p>" +
+        "<p class=\"muted\">Rdzeń instalatora: " + core_version_line() + "</p>"
+end
+
+fn core_version_line() -> string is
+    return "hackeros-installer-core"
+end
+
+fn render_language(idx: int) -> string is
+    return "<h2>Wybierz język</h2>" +
+        cycler_block(locales::locale_labels()[idx], idx, locale_count())
+end
+
+fn render_keyboard(idx: int) -> string is
+    return "<h2>Wybierz układ klawiatury</h2>" +
+        cycler_block(locales::keyboard_labels()[idx], idx, keyboard_count())
+end
+
+fn render_timezone(idx: int) -> string is
+    return "<h2>Wybierz strefę czasową</h2>" +
+        cycler_block(locales::timezone_labels()[idx], idx, timezone_count())
+end
+
+fn render_disk(disk_idx: int) -> string is
+    ;; UWAGA: karty wyboru w Silver muszą istnieć w HTML jako konkretne
+    ;; elementy — silnik nie potrafi wyrenderować listy o dynamicznej
+    ;; długości (patrz komentarz w engine/template.h#: {{}} podmienia
+    ;; tylko tekst, nie tworzy/usuwa węzłów). Dlatego lista dysków
+    ;; korzysta z tego samego "karuzelowego" wzorca co Język/Klawiatura/
+    ;; Strefa (cycle_prev/cycle_next), a nie z osobnej karty na dysk.
+    let disks: [model::Disk] = system_scan::detect_disks()
+    if disks.len() == 0 is
+        return "<h2>Dysk instalacyjny</h2>" +
+            "<p class=\"error\">Nie wykryto żadnego dysku. Podłącz nośnik i uruchom instalator ponownie.</p>"
+    end
+
+    let mut idx: int = disk_idx
+    if idx < 0 || idx >= disks.len() is idx = 0 end
+    let d: model::Disk = disks[idx]
+
+    let mut warn: string = ""
+    if d.removable is
+        warn = "<p class=\"error\">To urządzenie jest oznaczone jako wymienne (USB?) — upewnij się, że to na pewno właściwy dysk.</p>"
+    end
+
+    return "<h2>Wybierz dysk instalacyjny</h2>" +
+        "<p class=\"error\">Cała zawartość wybranego dysku zostanie trwale usunięta.</p>" +
+        cycler_block(model::disk_label(d), idx, disks.len()) +
+        warn
+end
+
+fn toggle_div(id_class: string, on: bool, label: string) -> string is
+    let cls: string = if on then "toggle on" else "toggle"
+    return "<div class=\"" + cls + "\" on-click=\"" + id_class + "\"><span>" + label + "</span></div>"
+end
+
+fn render_account(admin_on: bool) -> string is
+    return "<h2>Utwórz konto użytkownika</h2>" +
+        "<div class=\"col\">" +
+            "<p>Nazwa hosta</p><input id=\"hostname\" value=\"hackeros\" />" +
+            "<p>Nazwa użytkownika</p><input id=\"username\" value=\"\" />" +
+            "<p>Imię i nazwisko (opcjonalnie)</p><input id=\"fullname\" value=\"\" />" +
+            "<p>Hasło</p><input id=\"password\" value=\"\" />" +
+            "<p class=\"muted\">Silver v0.2 nie obsługuje jeszcze maskowania pól hasła — wpisywany tekst jest chwilowo widoczny wprost na ekranie.</p>" +
+            toggle_div("toggle_admin", admin_on, "Konto administratora (sudo)") +
+        "</div>"
+end
+
+fn render_summary(a: app::App, cfg: model::InstallConfig, accepted: bool) -> string is
+    let lines: [string] = config_io::summary_lines(cfg)
+    let mut body: string = "<h2>Podsumowanie</h2><div class=\"col\">"
+    let mut i: int = 0
+    while i < lines.len() is
+        body = body + "<p>" + html_escape(lines[i]) + "</p>"
+        i += 1
+    end
+    body = body + "</div>" +
+        toggle_div("toggle_accept", accepted, "Rozumiem, że dysk zostanie wymazany, i chcę kontynuować") +
+        "<p class=\"muted\">Instalacja jest wykonywana synchronicznie — po kliknięciu \"Instaluj\" okno przestanie reagować aż do zakończenia (ten silnik GUI nie ma wątków).</p>"
+    return body
+end
+
+fn render_installing() -> string is
+    return "<h2>Trwa instalacja</h2>" +
+        "<p>Proszę czekać, nie wyłączaj komputera…</p>"
+end
+
+fn render_done(a: app::App, ok: bool) -> string is
+    let title: string = if ok then "HackerOS został zainstalowany" else "Instalacja nie powiodła się"
+    let lines_raw: string = app::state(a, "result_lines")
+    let log_path: string = app::state(a, "result_log")
+    let lines: [string] = str::split(lines_raw, "\n")
+
+    let mut body: string = "<h2>" + title + "</h2><div class=\"col\">"
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = lines[i]
+        if line != "" is
+            let cls: string = if str::starts_with(line, "OK") then "result-line ok" else "result-line fail"
+            body = body + "<div class=\"" + cls + "\"><span>" + html_escape(line) + "</span></div>"
+        end
+        i += 1
+    end
+    body = body + "</div>" +
+        "<p class=\"muted\">Pełny log: " + html_escape(log_path) + "</p>" +
+        "<div class=\"btn primary\" on-click=\"do_reboot\"><span>Uruchom ponownie</span></div>"
+    return body
+end
+
+fn render(a: app::App, cfg: model::InstallConfig, error_msg: string) -> string is
+    let mut body: string = ""
+    match cfg.step is
+        model::Step::Welcome    => body = render_welcome()
+        model::Step::Language   => body = render_language(sync::atomic_load("locale_idx"))
+        model::Step::Keyboard   => body = render_keyboard(sync::atomic_load("keyboard_idx"))
+        model::Step::Timezone   => body = render_timezone(sync::atomic_load("timezone_idx"))
+        model::Step::Disk       => body = render_disk(sync::atomic_load("disk_idx"))
+        model::Step::Account    => body = render_account(i2b(sync::atomic_load("admin_on")))
+        model::Step::Summary    => body = render_summary(a, cfg, i2b(sync::atomic_load("accepted")))
+        model::Step::Installing => body = render_installing()
+        model::Step::Done       => body = render_done(a, i2b(sync::atomic_load("install_ok")))
+    end
+
+    let mut err_html: string = ""
+    if error_msg != "" is
+        err_html = "<p class=\"error\">" + html_escape(error_msg) + "</p>"
+    end
+
+    let next_label: string = if cfg.step == model::Step::Summary then "Instaluj" else "Dalej"
+
+    return
+        "<div class=\"page\"><div class=\"card\">" +
+            step_dots(cfg.step) +
+            "<p class=\"muted\">" + steps::step_subtitle(cfg.step) + "</p>" +
+            body +
+            err_html +
+            nav_row(cfg, next_label) +
+        "</div></div>"
+end
+
+;; ── punkt wejścia ────────────────────────────────────────────────────
+
+fn init_state() is
+    sync::atomic_new("step", steps::step_index(model::Step::Welcome))
+    sync::atomic_new("want_next", 0)
+    sync::atomic_new("want_prev", 0)
+
+    sync::atomic_new("locale_idx", 0)
+    sync::atomic_new("keyboard_idx", 0)
+    sync::atomic_new("timezone_idx", 0)
+
+    let disks: [model::Disk] = system_scan::detect_disks()
+    sync::atomic_new("disk_count", disks.len())
+    sync::atomic_new("disk_idx", -1)
+
+    sync::atomic_new("fs_btrfs", 0)
+    sync::atomic_new("swap_on", 1)
+    sync::atomic_new("admin_on", 1)
+    sync::atomic_new("accepted", 0)
+
+    sync::atomic_new("uefi", b2i(system_scan::detect_uefi()))
+    sync::atomic_new("install_done", 0)
+    sync::atomic_new("install_ok", 0)
+end
+
+fn main() is
+    init_state()
+
+    let mut a: app::App = app::new("Instalator HackerOS", 720, 560)
+    a = app::with_font(a, "frontend/fonts/DejaVuSans.ttf", 16)
+    a = app::load_css(a, "frontend/style.css")
+
+    a = app::command(a, "go_next", go_next)
+    a = app::command(a, "go_prev", go_prev)
+    a = app::command(a, "cycle_next", cycle_next)
+    a = app::command(a, "cycle_prev", cycle_prev)
+    a = app::command(a, "toggle_fs", toggle_fs)
+    a = app::command(a, "toggle_swap", toggle_swap)
+    a = app::command(a, "toggle_admin", toggle_admin)
+    a = app::command(a, "toggle_accept", toggle_accept)
+    a = app::command(a, "do_reboot", do_reboot)
+
+    a = app::on_tick(a, tick)
+
+    ;; Pierwszy render ręcznie, PRZED app::run — on_tick jest wołane
+    ;; dopiero po pierwszym zdarzeniu (patrz app::run w silver-main),
+    ;; więc bez tego ekran startowy pokazałby pustą stronę.
+    let first_cfg: model::InstallConfig = model::default_config("standard")
+    a = app::load_html_str(a, render(a, first_cfg, ""))
+
+    app::run(a)
+end
