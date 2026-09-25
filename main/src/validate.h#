@@ -1,0 +1,99 @@
+mod model
+
+use "std -> strings" from "str"
+
+pub struct ValidationResult is
+    pub ok:      bool
+    pub message: string   ;; "" gdy ok == true
+end
+
+fn ok() -> ValidationResult is
+    return ValidationResult { ok: true, message: "" }
+end
+
+fn fail(msg: string) -> ValidationResult is
+    return ValidationResult { ok: false, message: msg }
+end
+
+;; Nazwa użytkownika / hosta: litery, cyfry, myślnik, podkreślenie;
+;; musi zaczynać się od litery — te same reguły co `useradd`/`hostname`
+;; na większości dystrybucji Linuksa.
+fn is_valid_slug(s: string) -> bool is
+    if s == "" is return false end
+    let n: int = s.len()
+    let first: string = s[0..1]
+    let starts_lower: bool = first >= "a" && first <= "z"
+    if !starts_lower is return false end
+
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let is_lower: bool = c >= "a" && c <= "z"
+        let is_digit: bool = c >= "0" && c <= "9"
+        if !is_lower && !is_digit && c != "-" && c != "_" is
+            return false
+        end
+        i += 1
+    end
+    return true
+end
+
+pub fn validate_step(cfg: model::InstallConfig) -> ValidationResult is
+    match cfg.step is
+        model::Step::Welcome => ok()
+
+        model::Step::Language => is
+            if cfg.locale == "" is return fail("Wybierz język systemu.") end
+            return ok()
+        end
+
+        model::Step::Keyboard => is
+            if cfg.keyboard == "" is return fail("Wybierz układ klawiatury.") end
+            return ok()
+        end
+
+        model::Step::Timezone => is
+            if cfg.timezone == "" is return fail("Wybierz strefę czasową.") end
+            return ok()
+        end
+
+        model::Step::Disk => is
+            if cfg.target_disk == "" is
+                return fail("Wybierz dysk, na którym zainstalować HackerOS.")
+            end
+            if !cfg.erase_disk is
+                return fail("W tej wersji instalatora obsługiwane jest tylko całkowite wymazanie wybranego dysku.")
+            end
+            if cfg.filesystem != "ext4" && cfg.filesystem != "btrfs" is
+                return fail("Nieobsługiwany system plików: " + cfg.filesystem)
+            end
+            if cfg.enable_swap && cfg.swap_size_mb <= 0 is
+                return fail("Rozmiar partycji wymiany musi być większy od zera.")
+            end
+            return ok()
+        end
+
+        model::Step::Account => is
+            if !is_valid_slug(cfg.hostname) is
+                return fail("Nazwa hosta może zawierać tylko małe litery, cyfry, '-' i '_', i musi zaczynać się od litery.")
+            end
+            if !is_valid_slug(cfg.user.username) is
+                return fail("Nazwa użytkownika może zawierać tylko małe litery, cyfry, '-' i '_', i musi zaczynać się od litery.")
+            end
+            if str::trim(cfg.user.password).len() < 4 is
+                return fail("Hasło musi mieć co najmniej 4 znaki.")
+            end
+            return ok()
+        end
+
+        model::Step::Summary => is
+            if !cfg.accepted_summary is
+                return fail("Potwierdź podsumowanie, aby rozpocząć instalację.")
+            end
+            return ok()
+        end
+
+        model::Step::Installing => ok()
+        model::Step::Done       => ok()
+    end
+end
