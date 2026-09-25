@@ -1,0 +1,50 @@
+mod model
+
+use "std -> json" from "json"
+use "std -> fs"    from "fs"
+
+pub fn to_json(cfg: model::InstallConfig) -> string is
+    let mut obj: string = json::object()
+    obj = json::set_str(obj, "locale", cfg.locale)
+    obj = json::set_str(obj, "keyboard", cfg.keyboard)
+    obj = json::set_str(obj, "timezone", cfg.timezone)
+    obj = json::set_str(obj, "target_disk", cfg.target_disk)
+    obj = json::set_str(obj, "filesystem", cfg.filesystem)
+    obj = json::set_bool(obj, "enable_swap", cfg.enable_swap)
+    obj = json::set_int(obj, "swap_size_mb", cfg.swap_size_mb)
+    obj = json::set_str(obj, "hostname", cfg.hostname)
+    obj = json::set_str(obj, "username", cfg.user.username)
+    obj = json::set_bool(obj, "user_is_admin", cfg.user.is_admin)
+    obj = json::set_bool(obj, "uefi", cfg.uefi)
+    obj = json::set_str(obj, "edition", cfg.edition)
+    ;; Celowo POMIJANE: cfg.user.password, cfg.root_password — ten plik
+    ;; jest zapisywany obok logu instalacji i nie ma powodu, żeby
+    ;; kiedykolwiek zawierał hasła w jakiejkolwiek postaci.
+    return obj
+end
+
+pub fn save_summary(cfg: model::InstallConfig, path: string) is
+    fs::write(path, json::stringify_pretty(to_json(cfg), 2))
+end
+
+;; Gotowe do wyświetlenia linie "etykieta: wartość" na ekran Summary —
+;; wspólne dla Silver (renderowane jako kolejne `<p>`) i tui
+;; (złączone `\n`-ami w jeden string do `tui::style_render`).
+pub fn summary_lines(cfg: model::InstallConfig) -> [string] is
+    let mut lines: [string] = []
+    lines.push("Język: " + cfg.locale)
+    lines.push("Klawiatura: " + cfg.keyboard)
+    lines.push("Strefa czasowa: " + cfg.timezone)
+    lines.push("Dysk docelowy: " + cfg.target_disk + " (zostanie CAŁKOWICIE wymazany)")
+    lines.push("System plików: " + cfg.filesystem)
+    if cfg.enable_swap is
+        lines.push("Plik wymiany: " + to_string(cfg.swap_size_mb) + " MiB")
+    else is
+        lines.push("Plik wymiany: wyłączony")
+    end
+    lines.push("Nazwa hosta: " + cfg.hostname)
+    lines.push("Użytkownik: " + cfg.user.username +
+        if cfg.user.is_admin then " (administrator)" else " (zwykły użytkownik)")
+    lines.push("Tryb rozruchu: " + if cfg.uefi then "UEFI" else "BIOS/Legacy")
+    return lines
+end
