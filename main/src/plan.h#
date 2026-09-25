@@ -1,0 +1,193 @@
+mod model
+
+pub struct PlanStep is
+    pub label:   string   ;; opis pokazywany w UI podczas wykonywania
+    pub command: string   ;; polecenie powłoki (uruchamiane przez `sh -c`)
+end
+
+fn step(label: string, command: string) -> PlanStep is
+    return PlanStep { label: label, command: command }
+end
+
+;; Nazwa partycji systemowej/ESP dla danego urządzenia bazowego —
+;; `/dev/sda` -> `/dev/sda1`, ale `/dev/nvme0n1` -> `/dev/nvme0n1p1`
+;; (dyski NVMe/mmcblk wymagają litery "p" przed numerem partycji).
+fn part_suffix(device: string) -> string is
+    if device.ends_with("nvme0n1") || device.contains("nvme") || device.contains("mmcblk") is
+        return "p"
+    end
+    return ""
+end
+
+fn esp_part(device: string) -> string is
+    return device + part_suffix(device) + "1"
+end
+
+fn root_part(device: string, uefi: bool) -> string is
+    if uefi is
+        return device + part_suffix(device) + "2"
+    end
+    return device + part_suffix(device) + "1"
+end
+
+fn mkfs_cmd(fs: string, part: string) -> string is
+    if fs == "btrfs" is
+        return "mkfs.btrfs -f " + part
+    end
+    return "mkfs.ext4 -F " + part
+end
+
+;; ── Partycjonowanie i formatowanie ──────────────────────────────────
+
+pub fn partition_steps(cfg: model::InstallConfig) -> [PlanStep] is
+    let dev: string = cfg.target_disk
+    let mut out: [PlanStep] = []
+
+    out.push(step("Odmontowywanie istniejących partycji na " + dev,
+        "umount -R /mnt 2>/dev/null; swapoff -a 2>/dev/null || true"))
+
+    if cfg.uefi is
+        out.push(step("Tworzenie tablicy partycji GPT na " + dev,
+            "parted -s " + dev + " mklabel gpt"))
+        out.push(step("Tworzenie partycji EFI (512 MiB)",
+            "parted -s " + dev + " mkpart ESP fat32 1MiB 513MiB"))
+        out.push(step("Oznaczanie partycji EFI jako rozruchowej",
+            "parted -s " + dev + " set 1 esp on"))
+        out.push(step("Tworzenie partycji systemowej",
+            "parted -s " + dev + " mkpart primary " + cfg.filesystem + " 513MiB 100%"))
+        out.push(step("Formatowanie partycji EFI (FAT32)",
+            "mkfs.fat -F32 " + esp_part(dev)))
+    else is
+        out.push(step("Tworzenie tablicy partycji MBR na " + dev,
+            "parted -s " + dev + " mklabel msdos"))
+        out.push(step("Tworzenie partycji systemowej",
+            "parted -s " + dev + " mkpart primary " + cfg.filesystem + " 1MiB 100%"))
+        out.push(step("Oznaczanie partycji jako rozruchowej",
+            "parted -s " + dev + " set 1 boot on"))
+    end
+
+    out.push(step("Formatowanie partycji systemowej (" + cfg.filesystem + ")",
+        mkfs_cmd(cfg.filesystem, root_part(dev, cfg.uefi))))
+
+    out.push(step("Montowanie partycji systemowej w /mnt",
+        "mount " + root_part(dev, cfg.uefi) + " /mnt"))
+
+    if cfg.uefi is
+        out.push(step("Montowanie partycji EFI w /mnt/boot",
+            "mkdir -p /mnt/boot && mount " + esp_part(dev) + " /mnt/boot"))
+    end
+
+    return out
+end
+
+;; ── Kopiowanie systemu bazowego ─────────────────────────────────────
+
+pub fn base_system_steps(cfg: model::InstallConfig) -> [PlanStep] is
+    let mut out: [PlanStep] = []
+    out.push(step("Rozpakowywanie systemu bazowego HackerOS",
+        "unsquashfs -f -d /mnt /run/hackeros/airootfs.sfs"))
+    out.push(step("Generowanie /etc/fstab",
+        "genfstab -U /mnt >> /mnt/etc/fstab"))
+
+    if cfg.enable_swap is
+        out.push(step("Tworzenie pliku wymiany (" + to_string(cfg.swap_size_mb) + " MiB)",
+            "fallocate -l " + to_string(cfg.swap_size_mb) + "M /mnt/swapfile && " +
+            "chmod 600 /mnt/swapfile && mkswap /mnt/swapfile && " +
+            "echo '/swapfile none swap sw 0 0' >> /mnt/etc/fstab"))
+    end
+
+    return out
+end
+
+;; ── Konfiguracja wewnątrz zainstalowanego systemu (arch-chroot) ─────
+
+fn chroot(cmd: string) -> string is
+    return "arch-chroot /mnt /bin/sh -c \"" + cmd + "\""
+end
+
+pub fn system_config_steps(cfg: model::InstallConfig) -> [PlanStep] is
+    let mut out: [PlanStep] = []
+
+    out.push(step("Ustawianie strefy czasowej: " + cfg.timezone,
+        chroot("ln -sf /usr/share/zoneinfo/" + cfg.timezone + " /etc/localtime && hwclock --systohc")))
+
+    out.push(step("Ustawianie lokalizacji: " + cfg.locale,
+        chroot("echo '" + cfg.locale + " UTF-8' >> /etc/locale.gen && locale-gen && " +
+               "echo 'LANG=" + cfg.locale + "' > /etc/locale.conf")))
+
+    out.push(step("Ustawianie układu klawiatury: " + cfg.keyboard,
+        chroot("echo 'KEYMAP=" + cfg.keyboard + "' > /etc/vconsole.conf")))
+
+    out.push(step("Ustawianie nazwy hosta: " + cfg.hostname,
+        chroot("echo '" + cfg.hostname + "' > /etc/hostname && " +
+               "printf '127.0.0.1\\tlocalhost\\n::1\\t\\tlocalhost\\n127.0.1.1\\t" +
+               cfg.hostname + "\\n' > /etc/hosts")))
+
+    out.push(step("Instalowanie bootloadera (GRUB)", grub_install_command(cfg)))
+
+    out.push(step("Generowanie konfiguracji GRUB",
+        chroot("grub-mkconfig -o /boot/grub/grub.cfg")))
+
+    return out
+end
+
+fn grub_install_command(cfg: model::InstallConfig) -> string is
+    if cfg.uefi is
+        return chroot("grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=HackerOS")
+    end
+    return chroot("grub-install --target=i386-pc " + cfg.target_disk)
+end
+
+;; ── Konto użytkownika i hasła ────────────────────────────────────────
+;; UWAGA: te polecenia zawierają hasła w treści komendy powłoki
+;; (przez `chpasswd`, standardowe narzędzie Linuksa do tego celu).
+;; `installer_run::log_step` świadomie NIE loguje treści tych komend —
+;; patrz jego komentarz.
+
+pub fn account_steps(cfg: model::InstallConfig) -> [PlanStep] is
+    let mut out: [PlanStep] = []
+    let u: model::UserAccount = cfg.user
+
+    let comment: string = if u.full_name != "" then u.full_name else u.username
+    out.push(step("Tworzenie konta użytkownika: " + u.username,
+        chroot("useradd -m -c '" + comment + "' -s /bin/bash " + u.username)))
+
+    out.push(step("Ustawianie hasła użytkownika " + u.username,
+        chroot("echo '" + u.username + ":" + u.password + "' | chpasswd")))
+
+    if u.is_admin is
+        out.push(step("Dodawanie " + u.username + " do grupy administracyjnej",
+            chroot("usermod -aG wheel " + u.username + " && " +
+                   "sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers")))
+    end
+
+    if cfg.root_password != "" is
+        out.push(step("Ustawianie hasła roota",
+            chroot("echo 'root:" + cfg.root_password + "' | chpasswd")))
+    else is
+        out.push(step("Blokowanie logowania na konto roota (dostępny tylko sudo)",
+            chroot("passwd -l root")))
+    end
+
+    return out
+end
+
+;; ── Sprzątanie ───────────────────────────────────────────────────────
+
+pub fn finalize_steps(cfg: model::InstallConfig) -> [PlanStep] is
+    let mut out: [PlanStep] = []
+    out.push(step("Odmontowywanie systemu plików", "umount -R /mnt"))
+    return out
+end
+
+;; ── Pełny plan (kolejność wykonania) ────────────────────────────────
+
+pub fn full_plan(cfg: model::InstallConfig) -> [PlanStep] is
+    let mut out: [PlanStep] = []
+    out = out + partition_steps(cfg)
+    out = out + base_system_steps(cfg)
+    out = out + system_config_steps(cfg)
+    out = out + account_steps(cfg)
+    out = out + finalize_steps(cfg)
+    return out
+end
