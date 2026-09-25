@@ -1,1 +1,14 @@
+[package]
+-> name        => hackeros-installer-core
+-> version     => 0.1.0
+-> description => Wspólna logika instalatora HackerOS (model danych, wykrywanie sprzętu, plan partycjonowania, wykonywanie instalacji) — bez żadnego interfejsu użytkownika. Używana zarówno przez `standard` (Silver, GUI) jak i `server-edition` (tui, TTY).
+-> author      => HackerOS Team <hackeros068@gmail.com>
+-> license     => GPL-3.0
 
+[build]
+-> lang   => h#
+-> entry  => src/lib.h#
+-> output => build/libinstaller_core
+-> emit   => lib
+
+[deps]
