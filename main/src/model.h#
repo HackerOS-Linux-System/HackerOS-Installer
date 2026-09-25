@@ -1,0 +1,119 @@
+pub enum Step is
+    Welcome
+    Language
+    Keyboard
+    Timezone
+    Disk
+    Account
+    Summary
+    Installing
+    Done
+end
+
+;; ── Dysk wykryty w systemie (system_scan::detect_disks) ───────────────
+pub struct Disk is
+    pub device:    string   ;; np. "/dev/sda", "/dev/nvme0n1"
+    pub model:     string   ;; etykieta modelu z lsblk, "" jeśli nieznana
+    pub size_gb:   int
+    pub removable: bool     ;; dysk USB/wymienny — instalator ostrzega przed takim celem
+end
+
+pub fn disk_label(d: Disk) -> string is
+    let base: string = d.device + "  —  " + to_string(d.size_gb) + " GB"
+    if d.model != "" is
+        return base + "  (" + d.model + ")"
+    end
+    return base
+end
+
+;; ── Konto użytkownika tworzone podczas instalacji ──────────────────────
+pub struct UserAccount is
+    pub username:  string
+    pub full_name: string
+    ;; Hasło w postaci jawnej — tak jak je wpisano w formularzu/prompt.
+    ;; Haszowane dopiero wewnątrz `installer_run::run_install` (przez
+    ;; `openssl passwd -6`) tuż przed zapisem do zainstalowanego
+    ;; systemu; nigdy nie trafia na dysk w tej postaci i nigdy nie jest
+    ;; logowane (patrz installer_run.h#'s `log_step`, które świadomie
+    ;; pomija argumenty haseł).
+    pub password:  string
+    pub is_admin:  bool     ;; dodać do grupy administracyjnej (sudo/wheel)?
+end
+
+pub fn empty_user() -> UserAccount is
+    return UserAccount { username: "", full_name: "", password: "", is_admin: true }
+end
+
+;; ── Pełna konfiguracja instalacji ───────────────────────────────────────
+pub struct InstallConfig is
+    pub step: Step
+
+    ;; Regionalizacja
+    pub locale:   string   ;; np. "pl_PL.UTF-8"
+    pub keyboard: string   ;; np. "pl"
+    pub timezone: string   ;; np. "Europe/Warsaw"
+
+    ;; Dysk i partycjonowanie
+    pub target_disk:  string   ;; wybrane urządzenie, np. "/dev/sda" — "" = brak wyboru
+    pub erase_disk:   bool     ;; true = automatyczne partycjonowanie całego dysku (jedyny obsługiwany tryb w v0.1)
+    pub filesystem:   string   ;; "ext4" | "btrfs"
+    pub enable_swap:  bool
+    pub swap_size_mb: int
+
+    ;; System i konto
+    pub hostname:     string
+    pub user:         UserAccount
+    pub root_password: string   ;; "" = brak osobnego hasła roota (tylko sudo z konta użytkownika)
+
+    ;; Wykryte automatycznie (system_scan.h#), nie edytowane przez użytkownika
+    pub uefi: bool
+
+    ;; Tylko etykieta w logu/podsumowaniu — "standard" albo "server"
+    pub edition: string
+
+    ;; Ekran podsumowania musi zostać jawnie zaakceptowany zanim
+    ;; instalacja właściwa (installer_run::run_install) w ogóle ruszy —
+    ;; patrz validate::validate_step dla Step::Summary.
+    pub accepted_summary: bool
+end
+
+pub fn default_config(edition: string) -> InstallConfig is
+    return InstallConfig {
+        step: Step::Welcome,
+
+        locale:   "en_US.UTF-8",
+        keyboard: "us",
+        timezone: "UTC",
+
+        target_disk:  "",
+        erase_disk:   true,
+        filesystem:   "ext4",
+        enable_swap:  true,
+        swap_size_mb: 2048,
+
+        hostname: "hackeros",
+        user: empty_user(),
+        root_password: "",
+
+        uefi: false,
+
+        edition: edition,
+
+        accepted_summary: false
+    }
+end
+
+;; ── Wynik pojedynczego kroku instalacji właściwej (installer_run.h#) ───
+pub struct InstallStepResult is
+    pub label:   string   ;; opis kroku pokazywany w UI, np. "Formatowanie /dev/sda1"
+    pub ok:      bool
+    pub message: string   ;; szczegóły błędu, "" gdy ok
+end
+
+;; ── Wynik całej instalacji ──────────────────────────────────────────────
+pub struct InstallResult is
+    pub success:      bool
+    pub steps:        [InstallStepResult]
+    pub failed_label:  string   ;; label kroku, na którym przerwano, "" gdy success
+    pub log_path:      string
+end
