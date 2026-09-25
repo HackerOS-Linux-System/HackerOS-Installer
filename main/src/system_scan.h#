@@ -1,0 +1,97 @@
+mod model
+
+use "std -> process" from "process"
+use "std -> strings" from "str"
+use "std -> fs"       from "fs"
+use "std -> sys"      from "sys"
+use "std -> os"       from "os"
+
+;; ── RAM / CPU ────────────────────────────────────────────────────────
+
+pub fn ram_total_mb() -> int is
+    return sys::memory_total() / 1024 / 1024
+end
+
+pub fn cpu_count() -> int is
+    return sys::cpu_count()
+end
+
+;; ── UEFI vs BIOS ─────────────────────────────────────────────────────
+;; Obecność /sys/firmware/efi na żywym systemie/ISO oznacza start w
+;; trybie UEFI — dokładnie tak samo sprawdzają to prawdziwe instalatory
+;; (Calamares, Ubuntu's ubiquity, ...). Brak katalogu = BIOS/legacy.
+pub fn detect_uefi() -> bool is
+    return fs::exists("/sys/firmware/efi")
+end
+
+;; ── Nazwa hosta domyślna ──────────────────────────────────────────────
+;; Podpowiedź do pola "hostname" — jeśli obecny system live ma coś
+;; sensowniejszego niż "localhost", startujemy od tego zamiast
+;; sztywnego "hackeros".
+pub fn default_hostname() -> string is
+    let h: string = os::hostname()
+    if h == "" || h == "localhost" is return "hackeros" end
+    return h
+end
+
+;; ── Lista dysków ─────────────────────────────────────────────────────
+;; `lsblk -b -d -n -p -P -o NAME,SIZE,MODEL,RM` — jedna linia na
+;; urządzenie blokowe najwyższego poziomu (bez partycji, dzięki `-d`),
+;; w formacie `KLUCZ="wartość"` (dzięki `-P`), co pozwala bezpiecznie
+;; parsować MODEL zawierający spacje bez gubienia pól.
+pub fn detect_disks() -> [model::Disk] is
+    let out: string = process::run("lsblk -b -d -n -p -P -o NAME,SIZE,MODEL,RM 2>/dev/null")
+    let lines: [string] = str::split(out, "\n")
+    let mut disks: [model::Disk] = []
+
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::trim(lines[i])
+        if line != "" is
+            let d: model::Disk = parse_lsblk_line(line)
+            if d.device != "" is
+                disks.push(d)
+            end
+        end
+        i += 1
+    end
+    return disks
+end
+
+;; Wyciąga wartość klucza `key="..."` z linii w formacie `lsblk -P`.
+;; Zwraca "" jeśli klucz nie występuje.
+fn extract_field(line: string, key: string) -> string is
+    let marker: string = key + "=\""
+    let start: int = str::index_of(line, marker)
+    if start < 0 is return "" end
+    let value_start: int = start + marker.len()
+    let rest: string = str::slice(line, value_start, line.len())
+    let end_rel: int = str::index_of(rest, "\"")
+    if end_rel < 0 is return "" end
+    return str::slice(rest, 0, end_rel)
+end
+
+fn parse_lsblk_line(line: string) -> model::Disk is
+    let name:  string = extract_field(line, "NAME")
+    let size:  string = extract_field(line, "SIZE")
+    let model_: string = extract_field(line, "MODEL")
+    let rm:    string = extract_field(line, "RM")
+
+    let size_bytes: int = if str::is_numeric(size) then str_to_int(size) else 0
+    let size_gb: int = size_bytes / 1024 / 1024 / 1024
+
+    return model::Disk {
+        device: name,
+        model: model_,
+        size_gb: size_gb,
+        removable: rm == "1"
+    }
+end
+
+;; Wolna przestrzeń na dysku live/instalatora — nieużywane przy
+;; formatowaniu celu, ale przydatne do ostrzeżenia typu "za mało
+;; miejsca na obraz tymczasowy" zanim instalacja właściwa w ogóle
+;; ruszy.
+pub fn free_space_gb(path: string) -> int is
+    return sys::disk_free(path) / 1024 / 1024 / 1024
+end
