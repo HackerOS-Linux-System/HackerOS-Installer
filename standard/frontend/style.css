@@ -1,0 +1,61 @@
+.page   { background: #0e0f13; padding: 28px; }
+.card   { background: #ffffff; padding: 24px; margin: 8px; border: 1px; border-color: #dddddd; }
+
+h1 { color: #101014; font-size: 24px; }
+h2 { color: #101014; font-size: 16px; }
+p  { color: #4a4a52; font-size: 14px; }
+
+.muted { color: #8a8a92; font-size: 12px; }
+.error { color: #c94141; font-size: 13px; }
+.badge { background: #eef0ff; color: #2f3fb0; font-size: 12px; padding: 4px; margin: 4px; }
+
+/* Pasek postępu kroków (Welcome..Done) — jeden .step-dot na krok, */
+/* .step-dot.active podświetlony na bieżąco przez main.h# przy generowaniu. */
+.steps    { display: flex; flex-direction: row; gap: 6px; margin: 8px; }
+.step-dot { background: #d8d8e0; width: 22; height: 6; }
+.step-dot.active { background: #3a5edc; }
+.step-dot.done   { background: #7d8fe0; }
+
+.row    { display: flex; flex-direction: row; gap: 10px; margin: 8px; }
+.col    { display: flex; flex-direction: column; gap: 8px; margin: 8px; }
+.grid   { display: flex; flex-direction: row; gap: 10px; margin: 8px; }
+
+/* Karty wyboru (język/klawiatura/strefa/dysk) — .option.selected */
+/* dostaje kolor akcentu, ustawiany bezpośrednio w main.h# per opcja. */
+.option { background: #f2f2f7; padding: 12px; margin: 4px; border: 1px; border-color: #e2e2ea; }
+.option.selected { background: #3a5edc; border-color: #3a5edc; }
+.option span      { color: #202028; font-size: 14px; }
+.option.selected span { color: #ffffff; font-size: 14px; }
+
+.option.empty       { background: #f8f8fb; border-color: #ececf2; }
+.option.empty span  { color: #b6b6c0; font-size: 13px; }
+
+input {
+    display: block;
+    width: 340;
+    padding: 10px;
+    margin: 6px;
+    border: 1px;
+    border-color: #cccccc;
+    background: #ffffff;
+}
+label { color: #4a4a52; font-size: 13px; margin: 4px; }
+
+.toggle         { background: #eaeaf1; padding: 10px; margin: 6px; }
+.toggle.on      { background: #2f9e50; }
+.toggle span    { color: #202028; font-size: 14px; }
+.toggle.on span { color: #ffffff; font-size: 14px; }
+
+.btn         { background: #3a3a44; padding: 12px; margin: 6px; }
+.btn.primary { background: #3a5edc; }
+.btn.danger  { background: #c94141; }
+.btn.ghost   { background: #e2e2ea; }
+.btn span         { color: #ffffff; font-size: 14px; }
+.btn.ghost span   { color: #202028; font-size: 14px; }
+.btn.disabled       { background: #cfcfd6; }
+.btn.disabled span  { color: #7c7c86; font-size: 14px; }
+
+.result-line      { padding: 4px; margin: 2px; }
+.result-line span { color: #4a4a52; font-size: 13px; }
+.result-line.fail span { color: #c94141; font-size: 13px; }
+.result-line.ok   span { color: #2f9e50; font-size: 13px; }
