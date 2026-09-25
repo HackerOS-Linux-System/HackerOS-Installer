@@ -1,0 +1,97 @@
+mod model
+
+pub fn step_count() -> int is return 9 end
+
+pub fn step_index(step: model::Step) -> int is
+    match step is
+        model::Step::Welcome    => 0
+        model::Step::Language   => 1
+        model::Step::Keyboard   => 2
+        model::Step::Timezone   => 3
+        model::Step::Disk       => 4
+        model::Step::Account    => 5
+        model::Step::Summary    => 6
+        model::Step::Installing => 7
+        model::Step::Done       => 8
+    end
+end
+
+pub fn step_from_index(i: int) -> model::Step is
+    match i is
+        0 => model::Step::Welcome
+        1 => model::Step::Language
+        2 => model::Step::Keyboard
+        3 => model::Step::Timezone
+        4 => model::Step::Disk
+        5 => model::Step::Account
+        6 => model::Step::Summary
+        7 => model::Step::Installing
+        _ => model::Step::Done
+    end
+end
+
+;; Krótki tytuł kroku — nagłówek ekranu / zakładka.
+pub fn step_title(step: model::Step) -> string is
+    match step is
+        model::Step::Welcome    => "Witaj"
+        model::Step::Language   => "Język i lokalizacja"
+        model::Step::Keyboard   => "Układ klawiatury"
+        model::Step::Timezone   => "Strefa czasowa"
+        model::Step::Disk       => "Dysk instalacyjny"
+        model::Step::Account    => "Konto użytkownika"
+        model::Step::Summary    => "Podsumowanie"
+        model::Step::Installing => "Instalacja"
+        model::Step::Done       => "Zakończono"
+    end
+end
+
+;; Dłuższy opis pod tytułem — jedno zdanie, bez kropki na końcu (oba
+;; interfejsy doklejają swoją własną interpunkcję/formatowanie).
+pub fn step_subtitle(step: model::Step) -> string is
+    match step is
+        model::Step::Welcome    => "Kreator instalacji HackerOS"
+        model::Step::Language   => "Wybierz język systemu i format regionalny"
+        model::Step::Keyboard   => "Wybierz układ klawiatury używany po instalacji"
+        model::Step::Timezone   => "Wybierz strefę czasową dla zegara systemowego"
+        model::Step::Disk       => "Wybierz dysk, na którym zostanie zainstalowany HackerOS"
+        model::Step::Account    => "Utwórz swoje konto użytkownika"
+        model::Step::Summary    => "Sprawdź ustawienia przed rozpoczęciem instalacji"
+        model::Step::Installing => "Trwa instalacja — nie wyłączaj komputera"
+        model::Step::Done       => "HackerOS został zainstalowany"
+    end
+end
+
+;; Czy krok `s` da się jeszcze cofnąć przyciskiem "Wstecz"? Po
+;; rozpoczęciu właściwej instalacji cofanie jest zablokowane — patrz
+;; installer_run.h#, gdzie zmiany na dysku stają się nieodwracalne.
+pub fn can_go_back(step: model::Step) -> bool is
+    match step is
+        model::Step::Welcome    => false
+        model::Step::Installing => false
+        model::Step::Done       => false
+        _ => true
+    end
+end
+
+;; Czy krok `s` pokazuje przycisk "Dalej" (w przeciwieństwie do
+;; Installing, które samo przechodzi do Done po zakończeniu, i Done,
+;; które pokazuje "Zakończ"/"Uruchom ponownie" zamiast "Dalej")?
+pub fn can_go_next(step: model::Step) -> bool is
+    match step is
+        model::Step::Installing => false
+        model::Step::Done       => false
+        _ => true
+    end
+end
+
+pub fn next_step(step: model::Step) -> model::Step is
+    let i: int = step_index(step)
+    if i + 1 >= step_count() is return step end
+    return step_from_index(i + 1)
+end
+
+pub fn prev_step(step: model::Step) -> model::Step is
+    let i: int = step_index(step)
+    if i <= 0 is return step end
+    return step_from_index(i - 1)
+end
