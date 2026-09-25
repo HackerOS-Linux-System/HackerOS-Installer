@@ -1,1 +1,15 @@
+[package]
+-> name        => hackeros-installer-server
+-> version     => 0.1.0
+-> description => Tekstowy (TTY) instalator HackerOS (Server Edition), oparty o `tui`. Cała logika instalacji pochodzi z pakietu `main` (patrz -> include) — ten pakiet zawiera wyłącznie interfejs terminalowy.
+-> author      => HackerOS Team
+-> license     => GPL-3.0
 
+[build]
+-> lang    => h#
+-> entry   => src/main.h#
+-> output  => build/hackeros-installer-server
+-> include => ../main/src
+
+[deps]
+-> tui => v0.1
