@@ -1,10 +1,19 @@
-[workspace]
+[package]
 -> name        => hackeros-installer
--> version     => 0.1.0
--> mode        => standard
--> members     => ["main", "standard", "server-edition"]
--> build-order => ["main", "standard", "server-edition"]
+-> version     => 0.2.0
+-> description => Instalator HackerOS: rdzeń (main) + GUI Silver (standard) + TTY tui (server-edition)
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
+-> license     => GPL-3.0
+-> lang        => h#
 
-[build]
--> parallel => false
--> cache    => build/cache/
+[workspace]
+-> members => [main, standard, server-edition]
+-> mode    => standard
+
+[commands]
+-> test
+--> run => sh tests/test_runner.sh
+--> description => Testy wykonawcy planu instalacji (prawdziwy sh, bez H#)
+-> embed
+--> run => python3 tools/embed_runner.py
+--> description => Przegeneruj main/src/runner_embed.h# z main/runtime/runner.sh
