@@ -1,0 +1,200 @@
+mod model
+mod util
+
+use "std -> process" from "process"
+use "std -> strings" from "str"
+use "std -> fs"      from "fs"
+
+;; ── Stan sieci ───────────────────────────────────────────────────────
+
+pub fn state_dir() -> string is return "/run/hackeros-installer" end
+
+;; Jedno pytanie: czy jest Internet? ping do adresu IP (bez DNS) —
+;; wystarczy, żeby odróżnić "kabel/Wi-Fi działa" od "offline".
+pub fn is_online() -> bool is
+    let r: util::RunOut = util::run_rc("ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 1 9.9.9.9 >/dev/null 2>&1")
+    return r.code == 0
+end
+
+pub fn nmcli_available() -> bool is
+    return util::has_cmd("nmcli")
+end
+
+;; Czy w ogóle jest karta Wi-Fi (NetworkManager widzi urządzenie typu wifi).
+pub fn wifi_available() -> bool is
+    if !nmcli_available() is return false end
+    let out: string = process::run("nmcli -t -f TYPE device 2>/dev/null")
+    return out.contains("wifi")
+end
+
+;; ── Skan Wi-Fi ───────────────────────────────────────────────────────
+;; `nmcli -t` rozdziela pola dwukropkiem, a dwukropek WEWNĄTRZ SSID
+;; escapuje jako `\:` — zamieniamy go na znacznik na czas dzielenia.
+fn colon_marker() -> string is return "@@HOS-COLON@@" end
+
+pub fn parse_wifi(raw: string) -> [model::WifiNet] is
+    let lines: [string] = str::split(raw, "\n")
+    let mut nets: [model::WifiNet] = []
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::replace_all(lines[i], "\\:", colon_marker())
+        let f: [string] = str::split(line, ":")
+        if f.len() >= 4 is
+            let ssid: string = str::replace_all(f[1], colon_marker(), ":")
+            let sec_raw: string = str::replace_all(f[3], colon_marker(), ":")
+            let sec: string = if sec_raw == "--" then "" else sec_raw
+            if ssid != "" is
+                nets = insert_net(nets, model::WifiNet {
+                    ssid: ssid,
+                    signal: util::to_int_or(f[2], 0),
+                    security: sec,
+                    in_use: str::trim(f[0]) == "*"
+                })
+            end
+        end
+        i += 1
+    end
+    return nets
+end
+
+;; Wstawia sieć zachowując malejącą kolejność siły sygnału i bez
+;; duplikatów SSID (ta sama sieć widoczna z kilku punktów dostępowych).
+fn insert_net(nets: [model::WifiNet], n: model::WifiNet) -> [model::WifiNet] is
+    let mut out: [model::WifiNet] = []
+    let mut placed: bool = false
+    let mut i: int = 0
+    while i < nets.len() is
+        if nets[i].ssid == n.ssid is
+            ;; duplikat — zostaje silniejszy
+            if n.signal > nets[i].signal && !placed is
+                out.push(n)
+                placed = true
+            else is
+                out.push(nets[i])
+                placed = true
+            end
+        else is
+            if !placed && n.signal > nets[i].signal is
+                out.push(n)
+                placed = true
+            end
+            out.push(nets[i])
+        end
+        i += 1
+    end
+    if !placed is out.push(n) end
+    return out
+end
+
+pub fn scan_wifi(rescan: bool) -> [model::WifiNet] is
+    if !wifi_available() is return [] end
+    let flag: string = if rescan then "--rescan yes" else "--rescan no"
+    let out: string = process::run("nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY device wifi list " + flag + " 2>/dev/null")
+    return parse_wifi(out)
+end
+
+;; ── Łączenie z Wi-Fi (w tle, żeby UI nie zamarzało) ──────────────────
+;; `connect_start` uruchamia nmcli w tle i zapisuje wynik do pliku;
+;; `connect_poll` zwraca "" dopóki trwa, potem "ok" albo komunikat błędu.
+;; Hasło idzie przez zmienne środowiskowe procesu pomocniczego, nie przez
+;; argumenty nmcli widoczne w `ps`.
+fn connect_result_file() -> string is return state_dir() + "/wifi.result" end
+
+pub fn connect_start(ssid: string, password: string) is
+    fs::mkdir(state_dir())
+    fs::remove(connect_result_file())
+    let pw_part: string = if password == "" then "" else " password \"$HOS_WIFI_PW\""
+    let inner: string = "nmcli -w 25 device wifi connect \"$HOS_WIFI_SSID\"" + pw_part + " 2>&1; echo \"__HOS_RC=$?\""
+    let cmd: string = "HOS_WIFI_SSID=" + util::sh_quote(ssid) + " HOS_WIFI_PW=" + util::sh_quote(password) +
+        " sh -c " + util::sh_quote(inner + " > " + connect_result_file() + ".tmp; mv " +
+        connect_result_file() + ".tmp " + connect_result_file())
+    process::spawn(cmd)
+end
+
+pub fn connect_poll() -> string is
+    if !fs::exists(connect_result_file()) is return "" end
+    let raw: string = fs::read(connect_result_file())
+    let marker: string = "__HOS_RC="
+    let at: int = str::index_of(raw, marker)
+    if at < 0 is return "" end
+    let code: string = str::trim(str::slice(raw, at + marker.len(), raw.len()))
+    if code == "0" is return "ok" end
+    let msg: string = str::trim(str::slice(raw, 0, at))
+    return if msg == "" then "Nie udało się połączyć (kod " + code + ")" else msg
+end
+
+pub fn connect_clear() is
+    fs::remove(connect_result_file())
+end
+
+;; ── Serwery lustrzane pakietów ───────────────────────────────────────
+;; Lista wbudowana + opcjonalny plik /etc/hackeros-installer/mirrors.conf
+;; (linie: `id|etykieta|bazowy URL`). Bazowy URL BEZ końcówki
+;; /$repo/os/$arch — instalator dopisuje ją sam.
+pub fn mirrors_file() -> string is return "/etc/hackeros-installer/mirrors.conf" end
+
+pub fn mirrors() -> [model::Mirror] is
+    let mut out: [model::Mirror] = []
+    out.push(model::Mirror { id: "default", label: "Domyślny (bez zmian w nowym systemie)", url: "" })
+    if util::has_cmd("reflector") is
+        out.push(model::Mirror { id: "auto", label: "Automatycznie — najszybsze serwery (reflector)", url: "" })
+    end
+    if fs::exists(mirrors_file()) is
+        let lines: [string] = str::split(fs::read(mirrors_file()), "\n")
+        let mut i: int = 0
+        while i < lines.len() is
+            let line: string = str::trim(lines[i])
+            if line != "" && !line.starts_with("#") is
+                let f: [string] = str::split(line, "|")
+                if f.len() >= 3 is
+                    out.push(model::Mirror { id: str::trim(f[0]), label: str::trim(f[1]), url: str::trim(f[2]) })
+                end
+            end
+            i += 1
+        end
+    end
+    out.push(model::Mirror { id: "custom", label: "Własny adres URL…", url: "" })
+    return out
+end
+
+pub fn mirror_ids() -> [string] is
+    let ms: [model::Mirror] = mirrors()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ms.len() is
+        out.push(ms[i].id)
+        i += 1
+    end
+    return out
+end
+
+pub fn mirror_labels() -> [string] is
+    let ms: [model::Mirror] = mirrors()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ms.len() is
+        out.push(ms[i].label)
+        i += 1
+    end
+    return out
+end
+
+;; URL, który faktycznie trafi do mirrorlisty ("" = nie zmieniaj).
+pub fn resolve_mirror_url(mirror_id: string, custom_url: string) -> string is
+    if mirror_id == "custom" is return str::trim(custom_url) end
+    let ms: [model::Mirror] = mirrors()
+    let mut i: int = 0
+    while i < ms.len() is
+        if ms[i].id == mirror_id is return ms[i].url end
+        i += 1
+    end
+    return ""
+end
+
+;; Poprawny adres bazowy: http(s)://host[/ścieżka], bez spacji i cudzysłowów.
+pub fn is_valid_mirror_url(url: string) -> bool is
+    let u: string = str::trim(url)
+    if !(u.starts_with("http://") || u.starts_with("https://")) is return false end
+    if u.contains(" ") || u.contains("'") || u.contains("\"") || u.contains("$") || u.contains("`") is return false end
+    return u.len() > 10
+end
