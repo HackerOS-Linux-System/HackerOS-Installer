@@ -1,14 +1,29 @@
 [package]
 -> name        => hackeros-installer-core
--> version     => 0.1.0
--> description => Wspólna logika instalatora HackerOS (model danych, wykrywanie sprzętu, plan partycjonowania, wykonywanie instalacji) — bez żadnego interfejsu użytkownika. Używana zarówno przez `standard` (Silver, GUI) jak i `server-edition` (tui, TTY).
--> author      => HackerOS Team <hackeros068@gmail.com>
+-> version     => 0.2.0
+-> description => Wspólna logika instalatora HackerOS (model danych, wykrywanie sprzętu i innych systemów, sieć, profile, plan partycjonowania z LUKS/dual-boot/ręcznym trybem, wykonawca instalacji w tle z prawdziwymi kodami wyjścia i wznawianiem) — bez żadnego interfejsu użytkownika. Używana przez `standard` (Silver, GUI) i `server-edition` (tui, TTY).
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => GPL-3.0
+-> lang        => h#
+
+[edition]
+-> edition => 2026
+
+[layout]
+-> src => src
 
 [build]
--> lang   => h#
--> entry  => src/lib.h#
--> output => build/libinstaller_core
--> emit   => lib
+-> link => static
 
-[deps]
+[lib]
+-> output => hlib
+
+[dependencies]
+
+[commands]
+-> embed
+--> run => python3 ../tools/embed_runner.py
+--> description => Przegeneruj src/runner_embed.h# z runtime/runner.sh (po każdej zmianie runner.sh)
+-> test
+--> run => sh ../tests/test_runner.sh
+--> description => Testy runner.sh
