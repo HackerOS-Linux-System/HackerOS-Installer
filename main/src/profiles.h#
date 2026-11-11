@@ -1,0 +1,127 @@
+mod model
+
+use "std -> fs"      from "fs"
+use "std -> strings" from "str"
+
+;; ── Profile instalacji ───────────────────────────────────────────────────
+;; Każdy profil to (a) obraz bazowy w /run/hackeros/<image> — jeśli go nie
+;; ma na nośniku, używany jest uniwersalny airootfs.sfs — oraz (b) lista
+;; pakietów doinstalowywanych w nowym systemie (wymaga sieci).
+;;
+;; Listy pakietów to rozsądne domyślne wartości; zmień je tutaj albo
+;; podmień całą listę plikiem /etc/hackeros-installer/profiles.conf
+;; (linie: `id|etykieta|opis|obraz.sfs|pakiet1 pakiet2 ...`).
+
+pub fn images_dir() -> string is return "/run/hackeros" end
+pub fn fallback_image() -> string is return "airootfs.sfs" end
+pub fn override_file() -> string is return "/etc/hackeros-installer/profiles.conf" end
+
+fn builtin() -> [model::Profile] is
+    return [
+        model::Profile {
+            id: "minimal",
+            label: "Minimalny",
+            description: "Sam system bazowy, bez dodatkowych pakietów — działa także offline",
+            image: "minimal.sfs",
+            packages: []
+        },
+        model::Profile {
+            id: "desktop",
+            label: "Desktop",
+            description: "System bazowy + środowisko graficzne i aplikacje codzienne (wymaga sieci)",
+            image: "desktop.sfs",
+            packages: ["networkmanager", "xorg-server", "pipewire", "pipewire-pulse", "noto-fonts", "firefox"]
+        },
+        model::Profile {
+            id: "server-tools",
+            label: "Serwer / narzędzia",
+            description: "System bazowy + SSH, tmux, htop, git, curl, zapora (wymaga sieci)",
+            image: "server.sfs",
+            packages: ["openssh", "tmux", "htop", "git", "curl", "wget", "rsync", "ufw", "vim"]
+        }
+    ]
+end
+
+fn parse_override(text: string) -> [model::Profile] is
+    let mut out: [model::Profile] = []
+    let lines: [string] = str::split(text, "\n")
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::trim(lines[i])
+        if line != "" && !line.starts_with("#") is
+            let f: [string] = str::split(line, "|")
+            if f.len() >= 5 is
+                let pk: string = str::trim(f[4])
+                let pkgs: [string] = if pk == "" then [] else str::split_whitespace(pk)
+                out.push(model::Profile {
+                    id: str::trim(f[0]), label: str::trim(f[1]), description: str::trim(f[2]),
+                    image: str::trim(f[3]), packages: pkgs
+                })
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+pub fn all() -> [model::Profile] is
+    if fs::exists(override_file()) is
+        let custom: [model::Profile] = parse_override(fs::read(override_file()))
+        if custom.len() > 0 is return custom end
+    end
+    return builtin()
+end
+
+pub fn find(id: string) -> model::Profile is
+    let ps: [model::Profile] = all()
+    let mut i: int = 0
+    while i < ps.len() is
+        if ps[i].id == id is return ps[i] end
+        i += 1
+    end
+    return ps[0]
+end
+
+pub fn exists(id: string) -> bool is
+    let ps: [model::Profile] = all()
+    let mut i: int = 0
+    while i < ps.len() is
+        if ps[i].id == id is return true end
+        i += 1
+    end
+    return false
+end
+
+pub fn ids() -> [string] is
+    let ps: [model::Profile] = all()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ps.len() is
+        out.push(ps[i].id)
+        i += 1
+    end
+    return out
+end
+
+pub fn labels() -> [string] is
+    let ps: [model::Profile] = all()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ps.len() is
+        out.push(ps[i].label)
+        i += 1
+    end
+    return out
+end
+
+;; Ścieżka obrazu, który faktycznie zostanie rozpakowany (sprawdzone w
+;; chwili wywołania — na ISO live).
+pub fn image_path(p: model::Profile) -> string is
+    let dedicated: string = images_dir() + "/" + p.image
+    if fs::exists(dedicated) is return dedicated end
+    return images_dir() + "/" + fallback_image()
+end
+
+pub fn needs_network(p: model::Profile) -> bool is
+    return p.packages.len() > 0
+end
