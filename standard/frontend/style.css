@@ -59,3 +59,18 @@ label { color: #4a4a52; font-size: 13px; margin: 4px; }
 .result-line span { color: #4a4a52; font-size: 13px; }
 .result-line.fail span { color: #c94141; font-size: 13px; }
 .result-line.ok   span { color: #2f9e50; font-size: 13px; }
+
+/* ── dodatki v0.2 ─────────────────────────────────────────────────── */
+.ok   { color: #2f9e50; font-size: 13px; }
+
+/* pasek postępu instalacji: 40 segmentów (.bar-seg.on = wypełniony) */
+.bar     { display: flex; flex-direction: row; gap: 2px; margin: 8px; }
+.bar-seg { background: #d8d8e0; width: 16; height: 14; }
+.bar-seg.on { background: #3a5edc; }
+
+.plan      { background: #f6f6fa; padding: 8px; }
+.plan-line { color: #4a4a52; font-size: 12px; margin: 1px; }
+
+.part { background: #f6f6fa; padding: 6px; margin: 4px; border: 1px; border-color: #e2e2ea; }
+
+.result-line.warn span { color: #b8860b; font-size: 13px; }
