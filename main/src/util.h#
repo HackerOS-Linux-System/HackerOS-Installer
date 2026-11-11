@@ -1,0 +1,95 @@
+mod model
+
+use "std -> process" from "process"
+use "std -> strings" from "str"
+
+;; ── Wspólne drobiazgi: cytowanie powłoki, wyniki z kodem wyjścia ──────
+
+;; Cytuje napis dla `sh`: 'to jest '\''bezpieczne'\''' — każdy napis
+;; pochodzący od użytkownika (hasło, imię, SSID, URL) MUSI przejść przez
+;; tę funkcję, zanim trafi do polecenia powłoki.
+pub fn sh_quote(s: string) -> string is
+    return "'" + str::replace_all(s, "'", "'\\''") + "'"
+end
+
+;; Zamienia znaki sterujące na spacje — etykieta/polecenie w planie to
+;; jedna linia rozdzielana tabulatorami.
+pub fn one_line(s: string) -> string is
+    let mut out: string = str::replace_all(s, "\n", " ")
+    out = str::replace_all(out, "\r", " ")
+    out = str::replace_all(out, "\t", " ")
+    return out
+end
+
+;; Litery, cyfry i . _ - + / : @ — nic, co powłoka lub plik konfiguracyjny
+;; zinterpretowałby inaczej. Używane dla wartości wybieranych z list
+;; (strefa, lokalizacja, układ klawiatury, urządzenia).
+pub fn is_safe_token(s: string) -> bool is
+    if s == "" is return false end
+    let n: int = s.len()
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let lower: bool = c >= "a" && c <= "z"
+        let upper: bool = c >= "A" && c <= "Z"
+        let digit: bool = c >= "0" && c <= "9"
+        let punct: bool = c == "." || c == "_" || c == "-" || c == "+" || c == "/" || c == ":" || c == "@"
+        if !lower && !upper && !digit && !punct is return false end
+        i += 1
+    end
+    return true
+end
+
+pub fn b2i(b: bool) -> int is
+    if b is return 1 end
+    return 0
+end
+
+pub fn i2b(i: int) -> bool is return i == 1 end
+
+;; ── Uruchomienie z PRAWDZIWYM kodem wyjścia ────────────────────────────
+;; `process::run` zwraca tylko stdout+stderr. Opakowujemy polecenie tak,
+;; żeby powłoka dopisała na końcu znacznik z `$?` i go stąd wyciągamy.
+pub struct RunOut is
+    pub output: string
+    pub code:   int
+end
+
+pub fn run_rc(cmd: string) -> RunOut is
+    let marker: string = "__HOS_RC="
+    let raw: string = process::run("( " + cmd + " ) 2>&1; echo \"" + marker + "$?\"")
+    let at: int = str::index_of(raw, marker)
+    if at < 0 is
+        return RunOut { output: raw, code: -1 }
+    end
+    let out: string = str::slice(raw, 0, at)
+    let code_s: string = str::trim(str::slice(raw, at + marker.len(), raw.len()))
+    let code: int = if str::is_numeric(code_s) then str_to_int(code_s) else -1
+    return RunOut { output: str::trim(out), code: code }
+end
+
+;; Czy polecenie istnieje w PATH (np. `nmcli`, `os-prober`, `gparted`).
+pub fn has_cmd(name: string) -> bool is
+    return process::which(name) != ""
+end
+
+;; Wiersz tekstu `klucz=wartość` -> wartość ("" gdy brak). Dzieli po
+;; PIERWSZYM `=`, więc wartość może zawierać `=`.
+pub fn kv_get(text: string, key: string) -> string is
+    let lines: [string] = str::split(text, "\n")
+    let prefix: string = key + "="
+    let mut i: int = 0
+    while i < lines.len() is
+        if lines[i].starts_with(prefix) is
+            return str::slice(lines[i], prefix.len(), lines[i].len())
+        end
+        i += 1
+    end
+    return ""
+end
+
+pub fn to_int_or(s: string, fallback: int) -> int is
+    let t: string = str::trim(s)
+    if str::is_numeric(t) is return str_to_int(t) end
+    return fallback
+end
