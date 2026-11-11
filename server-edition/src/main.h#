@@ -1,50 +1,114 @@
-use "bytes -> tui" from "tui"
+use "bit -> tui"     from "tui"
+use "std -> process" from "process"
+use "std -> strings" from "str"
 
 mod model
+mod util
 mod steps
 mod system_scan
+mod network
+mod profiles
 mod locales
 mod validate
+mod plan
+mod runner_embed
 mod installer_run
 mod config_io
 
-;; ── stałe indeksy focusu na ekranie Account ─────────────────────────
-fn focus_hostname() -> int is return 0 end
-fn focus_username() -> int is return 1 end
-fn focus_fullname() -> int is return 2 end
-fn focus_password() -> int is return 3 end
-fn focus_admin()    -> int is return 4 end
-fn focus_count()    -> int is return 5 end
+;; ── Instalator HackerOS — Server Edition (TTY, tui) ──────────────────
+;;
+;; * Instalacja biegnie w TLE (installer_run::start → runner.sh); pętla
+;;   `tui::run` dostaje co ~100 ms komunikat "tick" i odpytuje `poll()`,
+;;   więc pasek postępu płynie na żywo i terminal nie zamarza.
+;; * Pola haseł są maskowane (gwiazdki) — `textinput` z tui nie ma trybu
+;;   hasła, więc maskujemy w widoku (mask_view); wartość trzymana jest zwykłym
+;;   textinput.
+;; * Uruchamiaj interpreterem (`bit run` / `h# preview`) — patrz README tui:
+;;   odczyt pojedynczego klawisza nie ma wsparcia w kompilatorze natywnym.
+
+fn max_parts() -> int is return 12 end
+fn fs_options() -> [string] is return ["ext4", "btrfs", "xfs", "vfat", "swap"] end
+fn root_fs_options() -> [string] is return ["ext4", "btrfs", "xfs"] end
+fn mode_ids() -> [string] is return ["auto", "alongside", "manual"] end
+fn mode_labels() -> [string] is
+    return ["Wymaż cały dysk", "Obok istniejących systemów (dual-boot)", "Ręcznie (własne partycje)"]
+end
 
 ;; ── model ─────────────────────────────────────────────────────────
 
 struct Model is
     pub step: model::Step
+    pub focus: int
 
-    pub locale_list:   any   ;; tui::ListModel
+    pub locale_list:   any
     pub keyboard_list: any
     pub timezone_list: any
-    pub disk_list:     any
-    pub disks:         [model::Disk]
 
-    pub fs_btrfs: bool
-    pub swap_on:  bool
-    pub admin_on: bool
-    pub accepted: bool
-    pub uefi:     bool
+    ;; sieć
+    pub online:      bool
+    pub wifi_nets:   [model::WifiNet]
+    pub wifi_list:   any
+    pub wifi_pw:     any
+    pub wifi_msg:    string
+    pub connecting:  bool
+    pub mirror_list: any
+    pub mirror_url:  any
 
-    pub hostname_input: any   ;; tui::TextInput
+    ;; dysk
+    pub disk_list:   any
+    pub disks:       [model::Disk]
+    pub mode_list:   any
+    pub fs_list:     any
+    pub swap_on:     bool
+    pub swap_input:  any
+    pub luks_on:     bool
+    pub luks_pw:     any
+    pub luks_pw2:    any
+    pub os_raw:      string
+    pub os_scanned:  bool
+
+    ;; partycje (tryb ręczny)
+    pub parts:       [model::PartInfo]
+    pub mp_inputs:   [any]
+    pub part_fs:     [int]
+    pub part_fmt:    [bool]
+    pub part_row:    int
+
+    ;; pakiety
+    pub profile_list: any
+    pub hsharp_on:    bool
+    pub bit_on:       bool
+
+    ;; konto
+    pub hostname_input: any
     pub username_input: any
     pub fullname_input: any
     pub password_input: any
-    pub focus_idx:       int
+    pub password2_input: any
+    pub rootpw_input:   any
+    pub rootpw2_input:  any
+    pub admin_on:       bool
 
+    ;; podsumowanie
+    pub accepted:         bool
+    pub show_plan:        bool
+    pub plan_scroll:      int
+    pub resume_available: bool
+    pub resume_on:        bool
+
+    pub uefi: bool
     pub error_msg: string
 
-    pub install_result: model::InstallResult
-    pub install_done:   bool
+    ;; instalacja
+    pub progress:    model::Progress
+    pub install_ok:  bool
+    pub idle_ticks:  int
 
     pub quitting: bool
+end
+
+fn list_from(items: [string]) -> any is
+    return tui::list_new(if items.len() == 0 then ["(brak)"] else items)
 end
 
 fn init() -> any is
@@ -55,44 +119,77 @@ fn init() -> any is
         disk_labels.push(model::disk_label(disks[i]))
         i += 1
     end
-    if disk_labels.len() == 0 is
-        disk_labels.push("(nie wykryto żadnego dysku)")
-    end
+    if disk_labels.len() == 0 is disk_labels.push("(nie wykryto żadnego dysku)") end
 
     let mut hostname_ti: any = tui::textinput_new("nazwa-hosta")
-    hostname_ti = tui::textinput_set_value(hostname_ti, "hackeros")
+    hostname_ti = tui::textinput_set_value(hostname_ti, system_scan::default_hostname())
+    let mut swap_ti: any = tui::textinput_new("2048")
+    swap_ti = tui::textinput_set_value(swap_ti, "2048")
 
     return Model {
-        step: model::Step::Welcome,
+        step: model::Step::Welcome, focus: 0,
 
         locale_list:   tui::list_new(locales::locale_labels()),
         keyboard_list: tui::list_new(locales::keyboard_labels()),
         timezone_list: tui::list_new(locales::timezone_labels()),
-        disk_list:     tui::list_new(disk_labels),
-        disks: disks,
 
-        fs_btrfs: false,
-        swap_on:  true,
-        admin_on: true,
-        accepted: false,
-        uefi:     system_scan::detect_uefi(),
+        online: false, wifi_nets: [], wifi_list: list_from([]),
+        wifi_pw: tui::textinput_new("hasło sieci"), wifi_msg: "", connecting: false,
+        mirror_list: tui::list_new(network::mirror_labels()),
+        mirror_url: tui::textinput_new("https://mirror.example.org/archlinux"),
+
+        disk_list: tui::list_new(disk_labels), disks: disks,
+        mode_list: tui::list_new(mode_labels()),
+        fs_list: tui::list_new(root_fs_options()),
+        swap_on: true, swap_input: swap_ti,
+        luks_on: false, luks_pw: tui::textinput_new("min. 8 znaków"), luks_pw2: tui::textinput_new("powtórz"),
+        os_raw: "", os_scanned: false,
+
+        parts: [], mp_inputs: [], part_fs: [], part_fmt: [], part_row: 0,
+
+        profile_list: tui::list_new(profile_menu()), hsharp_on: false, bit_on: false,
 
         hostname_input: hostname_ti,
         username_input: tui::textinput_new("np. hacker"),
         fullname_input: tui::textinput_new("opcjonalnie"),
         password_input: tui::textinput_new("hasło"),
-        focus_idx: 0,
+        password2_input: tui::textinput_new("powtórz hasło"),
+        rootpw_input: tui::textinput_new("puste = root zablokowany"),
+        rootpw2_input: tui::textinput_new("powtórz hasło roota"),
+        admin_on: true,
 
-        error_msg: "",
+        accepted: false, show_plan: false, plan_scroll: 0,
+        resume_available: false, resume_on: false,
 
-        install_result: model::InstallResult { success: false, steps: [], failed_label: "", log_path: "" },
-        install_done: false,
+        uefi: system_scan::detect_uefi(), error_msg: "",
+
+        progress: model::Progress { state: "idle", step: 0, total: 0, label: "", percent: 0 },
+        install_ok: false, idle_ticks: 0,
 
         quitting: false
     }
 end
 
+fn profile_menu() -> [string] is
+    let ps: [model::Profile] = profiles::all()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ps.len() is
+        out.push(ps[i].label + (if profiles::needs_network(ps[i]) then "  [wymaga sieci]" else "") + "  —  " + ps[i].description)
+        i += 1
+    end
+    return out
+end
+
 ;; ── InstallConfig z bieżącego modelu ─────────────────────────────────
+
+fn tv(ti: any) -> string is return tui::textinput_value(ti) end
+
+fn current_disk(m: Model) -> string is
+    let d_idx: int = tui::list_selected_index(m.disk_list)
+    if d_idx >= 0 && d_idx < m.disks.len() is return m.disks[d_idx].device end
+    return ""
+end
 
 fn build_cfg(m: Model) -> model::InstallConfig is
     let mut cfg: model::InstallConfig = model::default_config("server")
@@ -102,100 +199,436 @@ fn build_cfg(m: Model) -> model::InstallConfig is
     cfg.keyboard = locales::keyboard_codes()[tui::list_selected_index(m.keyboard_list)]
     cfg.timezone = locales::timezone_codes()[tui::list_selected_index(m.timezone_list)]
 
-    let d_idx: int = tui::list_selected_index(m.disk_list)
-    if d_idx >= 0 && d_idx < m.disks.len() is
-        cfg.target_disk = m.disks[d_idx].device
+    cfg.online = m.online
+    cfg.mirror_id = network::mirror_ids()[tui::list_selected_index(m.mirror_list)]
+    cfg.mirror_url = str::trim(tv(m.mirror_url))
+
+    cfg.target_disk = current_disk(m)
+    cfg.partition_mode = mode_ids()[tui::list_selected_index(m.mode_list)]
+    cfg.filesystem = root_fs_options()[tui::list_selected_index(m.fs_list)]
+    cfg.enable_swap = m.swap_on
+    cfg.swap_size_mb = util::to_int_or(tv(m.swap_input), 0)
+    cfg.luks = m.luks_on
+    cfg.luks_password = tv(m.luks_pw)
+    cfg.luks_confirm = tv(m.luks_pw2)
+
+    if cfg.partition_mode == "manual" is
+        let mut specs: [model::PartSpec] = []
+        let mut i: int = 0
+        while i < m.parts.len() is
+            let mp: string = str::trim(tv(m.mp_inputs[i]))
+            if mp != "" is
+                specs.push(model::PartSpec {
+                    device: m.parts[i].device, mountpoint: mp,
+                    fs: fs_options()[m.part_fs[i]], format: m.part_fmt[i]
+                })
+            end
+            i += 1
+        end
+        cfg.manual_parts = specs
     end
-    cfg.erase_disk = true
 
-    cfg.filesystem   = if m.fs_btrfs then "btrfs" else "ext4"
-    cfg.enable_swap  = m.swap_on
-    cfg.swap_size_mb = 2048
+    cfg.profile = profiles::ids()[tui::list_selected_index(m.profile_list)]
+    cfg.install_hsharp = m.hsharp_on
+    cfg.install_bit = m.bit_on
 
-    let hostname_val: string = tui::textinput_value(m.hostname_input)
+    let hostname_val: string = str::trim(tv(m.hostname_input))
     cfg.hostname = if hostname_val == "" then "hackeros" else hostname_val
-    cfg.user.username  = tui::textinput_value(m.username_input)
-    cfg.user.full_name = tui::textinput_value(m.fullname_input)
-    cfg.user.password  = tui::textinput_value(m.password_input)
+    cfg.user.username  = str::trim(tv(m.username_input))
+    cfg.user.full_name = tv(m.fullname_input)
+    cfg.user.password  = tv(m.password_input)
     cfg.user.is_admin  = m.admin_on
-    cfg.root_password  = ""   ;; jak w GUI — brak osobnego pola, root zablokowany (patrz plan::account_steps)
+    cfg.password_confirm = tv(m.password2_input)
+    cfg.root_password  = tv(m.rootpw_input)
+    cfg.root_confirm   = tv(m.rootpw2_input)
 
     cfg.uefi = m.uefi
     cfg.accepted_summary = m.accepted
-
+    cfg.resume_available = m.resume_available
+    cfg.resume = m.resume_on
     return cfg
 end
 
-;; ── nawigacja wspólna dla ekranów wyboru z listy ────────────────────
+;; ── pomocnicze operacje na tablicach (bez indeksowanego przypisania) ─
+
+fn set_any(items: [any], idx: int, val: any) -> [any] is
+    let mut out: [any] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
+
+fn set_int(items: [int], idx: int, val: int) -> [int] is
+    let mut out: [int] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
+
+fn set_bool(items: [bool], idx: int, val: bool) -> [bool] is
+    let mut out: [bool] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
+
+;; ── wejście do kroku (jednorazowe skanowanie) ────────────────────────
+
+fn refresh_wifi(m: Model, rescan: bool) -> Model is
+    let mut n: Model = m
+    n.wifi_nets = network::scan_wifi(rescan)
+    let mut labels: [string] = []
+    let mut i: int = 0
+    while i < n.wifi_nets.len() && i < 8 is
+        labels.push(model::wifi_label(n.wifi_nets[i]))
+        i += 1
+    end
+    n.wifi_list = list_from(labels)
+    return n
+end
+
+fn enter_step(m: Model, step: model::Step) -> Model is
+    let mut n: Model = m
+    n.step = step
+    n.focus = 0
+    n.error_msg = ""
+
+    if step == model::Step::Network is
+        n.online = network::is_online()
+        n.wifi_msg = ""
+        if network::wifi_available() is n = refresh_wifi(n, true) end
+    elsif step == model::Step::Disk is
+        if !n.os_scanned is
+            n.os_raw = system_scan::probe_other_os_raw()
+            n.os_scanned = true
+        end
+    elsif step == model::Step::Partitions is
+        let disk: string = current_disk(n)
+        let mut all: [model::PartInfo] = system_scan::detect_partitions(disk)
+        if all.len() > max_parts() is
+            let mut cut: [model::PartInfo] = []
+            let mut k: int = 0
+            while k < max_parts() is
+                cut.push(all[k])
+                k += 1
+            end
+            all = cut
+        end
+        ;; zachowujemy wpisane wartości, jeśli lista partycji się nie zmieniła
+        if all.len() != n.parts.len() is
+            n.parts = all
+            n.mp_inputs = []
+            n.part_fs = []
+            n.part_fmt = []
+            let mut i: int = 0
+            while i < all.len() is
+                n.mp_inputs.push(tui::textinput_new("punkt montowania"))
+                n.part_fs.push(if all[i].is_esp then 3 elsif all[i].fstype == "swap" then 4 else 0)
+                n.part_fmt.push(false)
+                i += 1
+            end
+        end
+        n.part_row = 0
+    elsif step == model::Step::Summary is
+        let st: string = installer_run::probe(build_cfg(n))
+        n.resume_available = st == "resume"
+        n.resume_on = st == "resume"
+        n.accepted = false
+        n.show_plan = false
+        n.plan_scroll = 0
+        if st == "running" is
+            n.step = model::Step::Installing
+            n.idle_ticks = 0
+        end
+    end
+    return n
+end
+
+;; ── nawigacja ────────────────────────────────────────────────────────
 
 fn go_back(m: Model) -> Model is
+    if !steps::can_go_back(m.step) is return m end
+    return enter_step(m, steps::prev_for(build_cfg(m)))
+end
+
+fn begin_install(m: Model, resume: bool) -> Model is
     let mut n: Model = m
-    if steps::can_go_back(m.step) is
-        n.step = steps::prev_step(m.step)
-        n.error_msg = ""
+    let cfg: model::InstallConfig = build_cfg(m)
+    config_io::save_resume(cfg)
+    let err: string = installer_run::start(cfg, resume)
+    if err != "" is
+        n.error_msg = err
+        return n
     end
+    n.step = model::Step::Installing
+    n.idle_ticks = 0
+    n.error_msg = ""
     return n
 end
 
 fn try_advance(m: Model) -> Model is
     let mut n: Model = m
     let cfg: model::InstallConfig = build_cfg(m)
-    let v: validate::ValidationResult = validate::validate_step(cfg)
-    if !v.ok is
-        n.error_msg = v.message
+    let mut res: validate::ValidationResult = validate::validate_step(cfg)
+    if res.ok && cfg.step == model::Step::Disk is
+        let free: model::FreeSpace = system_scan::detect_free_space(cfg.target_disk)
+        let ae: string = validate::alongside_error(cfg, free.size_mb)
+        if ae != "" is res = validate::ValidationResult { ok: false, message: ae } end
+    end
+    if !res.ok is
+        n.error_msg = res.message
         return n
     end
-    n.error_msg = ""
-    n.step = steps::next_step(m.step)
-    return n
+    if cfg.step == model::Step::Summary is
+        return begin_install(m, cfg.resume)
+    end
+    return enter_step(m, steps::next_for(cfg))
 end
 
-;; ── uruchomienie instalacji (synchronicznie — patrz komentarz w
-;;    standard/src/main.h#: żadna z dwóch edycji nie ma tu wątków) ────
+;; ── ticki: Wi-Fi w tle i postęp instalacji ───────────────────────────
 
-fn noop_progress(label: string, idx: int, total: int) is end
-
-fn run_and_finish(m: Model) -> Model is
+fn on_tick(m: Model) -> Model is
     let mut n: Model = m
-    n.step = model::Step::Installing
-    let cfg: model::InstallConfig = build_cfg(m)
-    n.install_result = installer_run::run_install(cfg, noop_progress)
-    n.install_done = true
-    n.step = model::Step::Done
+
+    if n.connecting is
+        let r: string = network::connect_poll()
+        if r != "" is
+            n.connecting = false
+            network::connect_clear()
+            n.online = network::is_online()
+            n.wifi_msg = if r == "ok" then "Połączono." else r
+        end
+    end
+
+    if n.step == model::Step::Installing is
+        let p: model::Progress = installer_run::poll()
+        n.progress = p
+        if p.state == "idle" is
+            n.idle_ticks = n.idle_ticks + 1
+            if n.idle_ticks > 150 is
+                n.error_msg = "Wykonawca instalacji nie wystartował. Sprawdź /var/log/hackeros-installer.log."
+                n.install_ok = false
+                n.step = model::Step::Done
+            end
+        end
+        if p.state == "ok" || p.state == "failed" is
+            n.install_ok = p.state == "ok"
+            if n.install_ok is config_io::clear_resume_config() end
+            n.step = model::Step::Done
+        end
+    end
     return n
 end
 
-;; ── routing klawiszy dla ekranu Account (4 pola + przełącznik admina) ─
+;; ── ekrany z polami tekstowymi: wspólny routing ──────────────────────
+
+fn next_visible(m: Model, from: int, count: int) -> int is
+    let mut f: int = (from + 1) % count
+    let mut guard: int = 0
+    while !focus_visible(m, f) && guard < count is
+        f = (f + 1) % count
+        guard += 1
+    end
+    return f
+end
+
+;; Które pola ekranu są teraz widoczne (tab pomija ukryte).
+fn focus_visible(m: Model, f: int) -> bool is
+    if m.step == model::Step::Disk is
+        let manual: bool = tui::list_selected_index(m.mode_list) == 2
+        if f == 2 || f == 3 is return !manual end
+        if f == 4 is return !manual && m.swap_on end
+        if f == 6 || f == 7 is return m.luks_on end
+        return true
+    end
+    return true
+end
+
+fn focus_count(step: model::Step) -> int is
+    if step == model::Step::Network is return 4 end
+    if step == model::Step::Disk is return 8 end
+    if step == model::Step::Profile is return 1 end
+    if step == model::Step::Account is return 8 end
+    return 1
+end
+
+;; ── update: Network ───────────────────────────────────────────────────
+
+fn update_network(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "tab") is
+        n.focus = next_visible(m, m.focus, 4)
+        return n
+    end
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+
+    ;; focus: 0 lista Wi-Fi · 1 hasło · 2 lista serwerów · 3 własny URL
+    if m.focus == 0 is
+        if tui::msg_is_key(msg, "r") is return refresh_wifi(m, true) end
+        if tui::msg_is_key(msg, "n") is
+            n.online = network::is_online()
+            return n
+        end
+        if tui::msg_is_key(msg, "c") is return start_connect(m) end
+        if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+        n.wifi_list = tui::list_update(m.wifi_list, msg)
+        return n
+    end
+    if m.focus == 1 is
+        if tui::msg_is_key(msg, "enter") is return start_connect(m) end
+        n.wifi_pw = tui::textinput_update(m.wifi_pw, msg)
+        return n
+    end
+    if m.focus == 2 is
+        if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+        n.mirror_list = tui::list_update(m.mirror_list, msg)
+        return n
+    end
+    if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+    n.mirror_url = tui::textinput_update(m.mirror_url, msg)
+    return n
+end
+
+fn start_connect(m: Model) -> Model is
+    let mut n: Model = m
+    let idx: int = tui::list_selected_index(m.wifi_list)
+    if idx < 0 || idx >= m.wifi_nets.len() is
+        n.wifi_msg = "Brak wybranej sieci."
+        return n
+    end
+    let net: model::WifiNet = m.wifi_nets[idx]
+    network::connect_start(net.ssid, tv(m.wifi_pw))
+    n.connecting = true
+    n.wifi_msg = "Łączenie z " + net.ssid + "…"
+    return n
+end
+
+;; ── update: Disk ──────────────────────────────────────────────────────
+;; focus: 0 dyski · 1 tryb · 2 system plików · 3 swap · 4 rozmiar swap ·
+;;        5 LUKS · 6 hasło LUKS · 7 powtórz hasło LUKS
+
+fn update_disk(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "tab") is
+        n.focus = next_visible(m, m.focus, 8)
+        return n
+    end
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+
+    if m.focus == 0 is
+        if tui::msg_is_key(msg, "r") is
+            n.os_raw = system_scan::probe_other_os_raw()
+            return n
+        end
+        n.disk_list = tui::list_update(m.disk_list, msg)
+    elsif m.focus == 1 is
+        n.mode_list = tui::list_update(m.mode_list, msg)
+    elsif m.focus == 2 is
+        n.fs_list = tui::list_update(m.fs_list, msg)
+    elsif m.focus == 3 is
+        if tui::msg_is_key(msg, "space") is n.swap_on = !m.swap_on end
+    elsif m.focus == 4 is
+        n.swap_input = tui::textinput_update(m.swap_input, msg)
+    elsif m.focus == 5 is
+        if tui::msg_is_key(msg, "space") is n.luks_on = !m.luks_on end
+    elsif m.focus == 6 is
+        n.luks_pw = tui::textinput_update(m.luks_pw, msg)
+    else is
+        n.luks_pw2 = tui::textinput_update(m.luks_pw2, msg)
+    end
+    return n
+end
+
+;; ── update: Partycje ──────────────────────────────────────────────────
+
+fn update_partitions(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+    if m.parts.len() == 0 is return m end
+
+    if tui::msg_is_key(msg, "down") || tui::msg_is_key(msg, "tab") is
+        n.part_row = (m.part_row + 1) % m.parts.len()
+        return n
+    end
+    if tui::msg_is_key(msg, "up") is
+        n.part_row = (m.part_row + m.parts.len() - 1) % m.parts.len()
+        return n
+    end
+    if tui::msg_is_key(msg, "ctrl+k") is
+        n.part_fs = set_int(m.part_fs, m.part_row, (m.part_fs[m.part_row] + 1) % fs_options().len())
+        return n
+    end
+    if tui::msg_is_key(msg, "ctrl+d") is
+        n.part_fmt = set_bool(m.part_fmt, m.part_row, !m.part_fmt[m.part_row])
+        return n
+    end
+    n.mp_inputs = set_any(m.mp_inputs, m.part_row, tui::textinput_update(m.mp_inputs[m.part_row], msg))
+    return n
+end
+
+;; ── update: Profil ────────────────────────────────────────────────────
+
+fn update_profile(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+    if tui::msg_is_key(msg, "h") is
+        n.hsharp_on = !m.hsharp_on
+        return n
+    end
+    if tui::msg_is_key(msg, "b") is
+        n.bit_on = !m.bit_on
+        return n
+    end
+    n.profile_list = tui::list_update(m.profile_list, msg)
+    return n
+end
+
+;; ── update: Konto ─────────────────────────────────────────────────────
+;; focus: 0 host · 1 użytkownik · 2 imię · 3 hasło · 4 powtórz · 5 root · 6 powtórz root · 7 admin
 
 fn focused_textinput(m: Model) -> any is
-    if m.focus_idx == focus_hostname() is return m.hostname_input end
-    if m.focus_idx == focus_username() is return m.username_input end
-    if m.focus_idx == focus_fullname() is return m.fullname_input end
-    return m.password_input
+    if m.focus == 0 is return m.hostname_input end
+    if m.focus == 1 is return m.username_input end
+    if m.focus == 2 is return m.fullname_input end
+    if m.focus == 3 is return m.password_input end
+    if m.focus == 4 is return m.password2_input end
+    if m.focus == 5 is return m.rootpw_input end
+    return m.rootpw2_input
 end
 
 fn with_focused_textinput(m: Model, ti: any) -> Model is
     let mut n: Model = m
-    if m.focus_idx == focus_hostname() is n.hostname_input = ti end
-    if m.focus_idx == focus_username() is n.username_input = ti end
-    if m.focus_idx == focus_fullname() is n.fullname_input = ti end
-    if m.focus_idx == focus_password() is n.password_input = ti end
+    if m.focus == 0 is n.hostname_input = ti end
+    if m.focus == 1 is n.username_input = ti end
+    if m.focus == 2 is n.fullname_input = ti end
+    if m.focus == 3 is n.password_input = ti end
+    if m.focus == 4 is n.password2_input = ti end
+    if m.focus == 5 is n.rootpw_input = ti end
+    if m.focus == 6 is n.rootpw2_input = ti end
     return n
 end
 
 fn update_account(m: Model, msg: any) -> Model is
     if tui::msg_is_key(msg, "tab") is
         let mut n: Model = m
-        n.focus_idx = (m.focus_idx + 1) % focus_count()
+        n.focus = (m.focus + 1) % 8
         return n
     end
-    if tui::msg_is_key(msg, "enter") is
-        return try_advance(m)
-    end
-    if tui::msg_is_key(msg, "esc") is
-        return go_back(m)
-    end
-    if m.focus_idx == focus_admin() is
+    if tui::msg_is_key(msg, "enter") is return try_advance(m) end
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+    if m.focus == 7 is
         if tui::msg_is_key(msg, "space") is
             let mut n: Model = m
             n.admin_on = !m.admin_on
@@ -203,8 +636,58 @@ fn update_account(m: Model, msg: any) -> Model is
         end
         return m
     end
-    let ti: any = tui::textinput_update(focused_textinput(m), msg)
-    return with_focused_textinput(m, ti)
+    return with_focused_textinput(m, tui::textinput_update(focused_textinput(m), msg))
+end
+
+;; ── update: Summary / Done ───────────────────────────────────────────
+
+fn update_summary(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "space") is
+        n.accepted = !m.accepted
+        return n
+    end
+    if tui::msg_is_key(msg, "p") is
+        n.show_plan = !m.show_plan
+        n.plan_scroll = 0
+        return n
+    end
+    if tui::msg_is_key(msg, "r") && m.resume_available is
+        n.resume_on = !m.resume_on
+        return n
+    end
+    if m.show_plan is
+        if tui::msg_is_key(msg, "down") is
+            n.plan_scroll = m.plan_scroll + 1
+            return n
+        end
+        if tui::msg_is_key(msg, "up") is
+            n.plan_scroll = if m.plan_scroll > 0 then m.plan_scroll - 1 else 0
+            return n
+        end
+    end
+    if tui::msg_is_key(msg, "esc") is return go_back(m) end
+    if tui::msg_is_key(msg, "enter") is
+        if !m.accepted is
+            n.error_msg = "Naciśnij spację, aby potwierdzić podsumowanie."
+            return n
+        end
+        return try_advance(m)
+    end
+    return m
+end
+
+fn update_done(m: Model, msg: any) -> Model is
+    let mut n: Model = m
+    if tui::msg_is_key(msg, "r") is
+        if m.install_ok is
+            process::run("reboot")
+            n.quitting = true
+        else is
+            return begin_install(m, true)
+        end
+    end
+    return n
 end
 
 ;; ── update główny ────────────────────────────────────────────────────
@@ -218,8 +701,16 @@ fn update(model_in: any, msg: any) -> any is
         return (q, tui::cmd_quit())
     end
 
+    if tui::msg_is_tick(msg) is
+        return (on_tick(m), tui::cmd_none())
+    end
+
     if m.step == model::Step::Welcome is
         if tui::msg_is_key(msg, "enter") is return (try_advance(m), tui::cmd_none()) end
+        if tui::msg_is_key(msg, "l") && config_io::has_resume_config() is
+            let mut n: Model = apply_saved(m)
+            return (n, tui::cmd_none())
+        end
         if tui::msg_is_key(msg, "q") is
             let mut q: Model = m
             q.quitting = true
@@ -228,67 +719,119 @@ fn update(model_in: any, msg: any) -> any is
         return (m, tui::cmd_none())
     end
 
+    let mut n: Model = m
     if m.step == model::Step::Language is
         if tui::msg_is_key(msg, "enter") is return (try_advance(m), tui::cmd_none()) end
         if tui::msg_is_key(msg, "esc") is return (go_back(m), tui::cmd_none()) end
-        let mut n: Model = m
         n.locale_list = tui::list_update(m.locale_list, msg)
         return (n, tui::cmd_none())
     end
-
     if m.step == model::Step::Keyboard is
         if tui::msg_is_key(msg, "enter") is return (try_advance(m), tui::cmd_none()) end
         if tui::msg_is_key(msg, "esc") is return (go_back(m), tui::cmd_none()) end
-        let mut n: Model = m
         n.keyboard_list = tui::list_update(m.keyboard_list, msg)
         return (n, tui::cmd_none())
     end
-
     if m.step == model::Step::Timezone is
         if tui::msg_is_key(msg, "enter") is return (try_advance(m), tui::cmd_none()) end
         if tui::msg_is_key(msg, "esc") is return (go_back(m), tui::cmd_none()) end
-        let mut n: Model = m
         n.timezone_list = tui::list_update(m.timezone_list, msg)
         return (n, tui::cmd_none())
     end
+    if m.step == model::Step::Network    is return (update_network(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Disk       is return (update_disk(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Partitions is return (update_partitions(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Profile    is return (update_profile(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Account    is return (update_account(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Summary    is return (update_summary(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Installing is return (m, tui::cmd_none()) end
 
-    if m.step == model::Step::Disk is
-        if tui::msg_is_key(msg, "enter") is return (try_advance(m), tui::cmd_none()) end
-        if tui::msg_is_key(msg, "esc") is return (go_back(m), tui::cmd_none()) end
-        let mut n: Model = m
-        n.disk_list = tui::list_update(m.disk_list, msg)
-        return (n, tui::cmd_none())
-    end
-
-    if m.step == model::Step::Account is
-        return (update_account(m, msg), tui::cmd_none())
-    end
-
-    if m.step == model::Step::Summary is
-        if tui::msg_is_key(msg, "space") is
-            let mut n: Model = m
-            n.accepted = !m.accepted
-            return (n, tui::cmd_none())
-        end
-        if tui::msg_is_key(msg, "esc") is return (go_back(m), tui::cmd_none()) end
-        if tui::msg_is_key(msg, "enter") is
-            if !m.accepted is
-                let mut n: Model = m
-                n.error_msg = "Naciśnij spację, aby potwierdzić podsumowanie."
-                return (n, tui::cmd_none())
-            end
-            return (run_and_finish(m), tui::cmd_none())
-        end
-        return (m, tui::cmd_none())
-    end
-
-    if m.step == model::Step::Done is
-        let mut q: Model = m
+    ;; Done
+    let d: Model = update_done(m, msg)
+    if d.quitting is return (d, tui::cmd_quit()) end
+    if tui::msg_is_key(msg, "q") || tui::msg_is_key(msg, "enter") is
+        let mut q: Model = d
         q.quitting = true
         return (q, tui::cmd_quit())
     end
+    return (d, tui::cmd_none())
+end
 
-    return (m, tui::cmd_none())
+;; Wczytanie zapisanej konfiguracji (wznawianie) — wypełnia listy i pola.
+fn index_of_str(items: [string], x: string) -> int is
+    let mut i: int = 0
+    while i < items.len() is
+        if items[i] == x is return i end
+        i += 1
+    end
+    return -1
+end
+
+fn select_idx(l: any, items: [string], x: string) -> any is
+    let idx: int = index_of_str(items, x)
+    if idx < 0 is return l end
+    let mut cur: any = l
+    let mut guard: int = 0
+    while tui::list_selected_index(cur) < idx && guard < 500 is
+        cur = tui::list_update(cur, tui::key_msg("down"))
+        guard += 1
+    end
+    return cur
+end
+
+fn apply_saved(m: Model) -> Model is
+    let c: model::InstallConfig = config_io::load_resume(build_cfg(m))
+    let mut n: Model = m
+    n.locale_list   = select_idx(m.locale_list, locales::locale_codes(), c.locale)
+    n.keyboard_list = select_idx(m.keyboard_list, locales::keyboard_codes(), c.keyboard)
+    n.timezone_list = select_idx(m.timezone_list, locales::timezone_codes(), c.timezone)
+    n.mirror_list   = select_idx(m.mirror_list, network::mirror_ids(), c.mirror_id)
+    n.mirror_url    = tui::textinput_set_value(m.mirror_url, c.mirror_url)
+
+    let mut dev_list: [string] = []
+    let mut i: int = 0
+    while i < m.disks.len() is
+        dev_list.push(m.disks[i].device)
+        i += 1
+    end
+    n.disk_list = select_idx(m.disk_list, dev_list, c.target_disk)
+    n.mode_list = select_idx(m.mode_list, mode_ids(), c.partition_mode)
+    n.fs_list   = select_idx(m.fs_list, root_fs_options(), c.filesystem)
+    n.swap_on = c.enable_swap
+    n.swap_input = tui::textinput_set_value(m.swap_input, to_string(c.swap_size_mb))
+    n.luks_on = c.luks
+    n.profile_list = select_idx(m.profile_list, profiles::ids(), c.profile)
+    n.hsharp_on = c.install_hsharp
+    n.bit_on = c.install_bit
+    n.hostname_input = tui::textinput_set_value(m.hostname_input, c.hostname)
+    n.username_input = tui::textinput_set_value(m.username_input, c.user.username)
+    n.fullname_input = tui::textinput_set_value(m.fullname_input, c.user.full_name)
+    n.admin_on = c.user.is_admin
+    n.error_msg = ""
+
+    ;; ręczne partycje: odtwarzamy po wejściu na ekran Partycje
+    if c.partition_mode == "manual" is
+        let mut tmp: Model = enter_step(n, model::Step::Partitions)
+        let mut k: int = 0
+        while k < tmp.parts.len() is
+            let mut j: int = 0
+            while j < c.manual_parts.len() is
+                if c.manual_parts[j].device == tmp.parts[k].device is
+                    tmp.mp_inputs = set_any(tmp.mp_inputs, k, tui::textinput_set_value(tmp.mp_inputs[k], c.manual_parts[j].mountpoint))
+                    tmp.part_fmt = set_bool(tmp.part_fmt, k, c.manual_parts[j].format)
+                    let fidx: int = index_of_str(fs_options(), c.manual_parts[j].fs)
+                    if fidx >= 0 is tmp.part_fs = set_int(tmp.part_fs, k, fidx) end
+                end
+                j += 1
+            end
+            k += 1
+        end
+        n = tmp
+    end
+    ;; Hasła nie są zapisywane — wracamy do ekranu Konto, żeby wpisać je ponownie.
+    let mut acc: Model = enter_step(n, model::Step::Account)
+    acc.error_msg = "Wczytano zapisaną konfigurację. Wpisz ponownie hasła — nie są nigdzie zapisywane."
+    return acc
 end
 
 ;; ── widoki ────────────────────────────────────────────────────────
@@ -305,7 +848,6 @@ fn error_style() -> any is
     return tui::style_bold(tui::style_fg(tui::style_new(), "red"), true)
 end
 
-;; "●" dla ukończonych/bieżącego kroku, "○" dla pozostałych.
 fn step_dots(current: model::Step) -> string is
     let cur_i: int = steps::step_index(current)
     let mut out: string = ""
@@ -329,10 +871,45 @@ fn error_block(m: Model) -> string is
     return "\n" + tui::style_render(error_style(), m.error_msg)
 end
 
+fn marker(on: bool) -> string is
+    return if on then tui::colorize("> ", "cyan") else "  "
+end
+
+fn check(on: bool) -> string is
+    return if on then "[x]" else "[ ]"
+end
+
+fn field_line(label: string, ti: any, focused: bool) -> string is
+    return marker(focused) + label + ": " + (if focused then tui::textinput_view(ti) else tui::textinput_view(tui::textinput_focus(ti, false)))
+end
+
+;; Pole hasła: gwiazdki zamiast znaków (textinput z tui nie ma trybu hasła).
+fn mask_view(ti: any, focused: bool, placeholder: string) -> string is
+    let n: int = tui::textinput_value(ti).len()
+    if n == 0 is
+        return if focused then tui::style_render(tui::style_bg(tui::style_new(), "white"), " ") + tui::colorize(placeholder, "8")
+            else tui::colorize(placeholder, "8")
+    end
+    let stars: string = str::repeat("*", n)
+    return if focused then stars + tui::style_render(tui::style_bg(tui::style_new(), "white"), " ") else stars
+end
+
+fn pw_line(label: string, ti: any, focused: bool, placeholder: string) -> string is
+    return marker(focused) + label + ": " + mask_view(ti, focused, placeholder)
+end
+
+fn section(title: string, focused: bool) -> string is
+    return (if focused then tui::colorize(title, "cyan") else title)
+end
+
 fn view_welcome(m: Model) -> string is
+    let resume_line: string = if config_io::has_resume_config()
+        then "\n" + tui::colorize("Znaleziono konfigurację przerwanej instalacji — naciśnij l, aby ją wczytać.", "yellow") + "\n"
+        else ""
     return header(m) + "\n\n" +
         "Ten kreator przeprowadzi Cię przez instalację HackerOS (Server Edition, TTY) na tym komputerze.\n" +
-        tui::help_view(["enter", "q"], ["dalej", "wyjście"])
+        resume_line +
+        tui::help_view(["enter", "l", "q"], ["dalej", "wczytaj zapisaną konfigurację", "wyjście"])
 end
 
 fn view_choice(m: Model, list: any) -> string is
@@ -340,32 +917,121 @@ fn view_choice(m: Model, list: any) -> string is
         tui::help_view(["↑/↓", "enter", "esc"], ["wybierz", "dalej", "wstecz"])
 end
 
-fn view_disk(m: Model) -> string is
-    let d_idx: int = tui::list_selected_index(m.disk_list)
-    let mut warn: string = ""
-    if d_idx >= 0 && d_idx < m.disks.len() && m.disks[d_idx].removable is
-        warn = "\n" + tui::style_render(error_style(), "Uwaga: to urządzenie jest oznaczone jako wymienne (USB?).")
+fn view_network(m: Model) -> string is
+    let status: string = if m.online then tui::colorize("Połączono z Internetem.", "green")
+        else tui::style_render(error_style(), "Brak połączenia z Internetem (możesz kontynuować offline z profilem Minimalny).")
+    let mut out: string = header(m) + "\n\n" + status + "\n\n"
+    if network::wifi_available() is
+        out = out + section("Sieci Wi-Fi", m.focus == 0) + "\n" + tui::list_view(m.wifi_list) + "\n" +
+            pw_line("Hasło sieci", m.wifi_pw, m.focus == 1, "hasło sieci") + "\n"
+        if m.wifi_msg != "" is out = out + tui::colorize(m.wifi_msg, "yellow") + "\n" end
+        out = out + "\n"
+    else is
+        out = out + tui::colorize("Brak karty Wi-Fi / NetworkManagera — użyj kabla sieciowego.", "8") + "\n\n"
     end
-    return header(m) + "\n\n" +
-        tui::style_render(error_style(), "Cała zawartość wybranego dysku zostanie trwale usunięta.") + "\n\n" +
-        tui::list_view(m.disk_list) + warn + error_block(m) + "\n" +
-        tui::help_view(["↑/↓", "enter", "esc"], ["wybierz", "dalej", "wstecz"])
+    out = out + section("Serwer pakietów", m.focus == 2) + "\n" + tui::list_view(m.mirror_list) + "\n"
+    if network::mirror_ids()[tui::list_selected_index(m.mirror_list)] == "custom" is
+        out = out + field_line("Adres serwera", m.mirror_url, m.focus == 3) + "\n"
+    end
+    return out + error_block(m) + "\n" +
+        tui::help_view(["tab", "↑/↓", "c", "r", "n", "enter", "esc"],
+            ["pole", "wybierz", "połącz", "skanuj", "sprawdź sieć", "dalej", "wstecz"])
 end
 
-fn field_line(label: string, ti: any, focused: bool) -> string is
-    let marker: string = if focused then "> " else "  "
-    return marker + label + ": " + tui::textinput_view(ti)
+fn view_disk(m: Model) -> string is
+    let d_idx: int = tui::list_selected_index(m.disk_list)
+    let mode: int = tui::list_selected_index(m.mode_list)
+    let disk: string = current_disk(m)
+    let mut out: string = header(m) + "\n\n" + section("Dysk", m.focus == 0) + "\n" + tui::list_view(m.disk_list) + "\n"
+    if d_idx >= 0 && d_idx < m.disks.len() && m.disks[d_idx].removable is
+        out = out + tui::style_render(error_style(), "Uwaga: to urządzenie jest oznaczone jako wymienne (USB?).") + "\n"
+    end
+
+    let others: [model::OtherOs] = system_scan::other_os_on_disk(system_scan::parse_other_os(m.os_raw), disk)
+    if others.len() > 0 is
+        out = out + tui::colorize("Wykryte systemy na tym dysku:", "yellow") + "\n"
+        let mut o: int = 0
+        while o < others.len() is
+            out = out + "  • " + model::other_os_label(others[o]) + "\n"
+            o += 1
+        end
+    elsif !system_scan::os_prober_available() is
+        out = out + tui::colorize("Brak os-prober — nie można wykryć innych systemów.", "8") + "\n"
+    end
+
+    out = out + "\n" + section("Partycjonowanie", m.focus == 1) + "\n" + tui::list_view(m.mode_list) + "\n"
+    if mode == 0 is
+        out = out + tui::style_render(error_style(), "Cała zawartość dysku " + disk + " zostanie trwale usunięta.") + "\n"
+    elsif mode == 1 is
+        let free: model::FreeSpace = system_scan::detect_free_space(disk)
+        out = out + "Wolne miejsce do użycia: " + to_string(free.size_mb) + " MiB (wymagane " +
+            to_string(validate::alongside_min_mb()) + " MiB). Istniejące partycje nie są ruszane.\n"
+    else is
+        out = out + "Na następnym ekranie przypiszesz punkty montowania do istniejących partycji.\n"
+    end
+
+    if mode != 2 is
+        out = out + "\n" + section("System plików", m.focus == 2) + "\n" + tui::list_view(m.fs_list) + "\n" +
+            marker(m.focus == 3) + check(m.swap_on) + " Plik wymiany (spacja)\n"
+        if m.swap_on is out = out + field_line("Rozmiar swap (MiB)", m.swap_input, m.focus == 4) + "\n" end
+    end
+    out = out + marker(m.focus == 5) + check(m.luks_on) + " Zaszyfruj dysk (LUKS2) (spacja)\n"
+    if m.luks_on is
+        out = out + pw_line("Hasło szyfrowania", m.luks_pw, m.focus == 6, "min. 8 znaków") + "\n" +
+            pw_line("Powtórz hasło     ", m.luks_pw2, m.focus == 7, "powtórz") + "\n" +
+            tui::colorize("Powstanie niezaszyfrowana partycja /boot (1 GiB).", "8") + "\n"
+    end
+    return out + error_block(m) + "\n" +
+        tui::help_view(["tab", "↑/↓", "spacja", "r", "enter", "esc"],
+            ["następne pole", "wybierz", "przełącz", "skanuj systemy", "dalej", "wstecz"])
+end
+
+fn view_partitions(m: Model) -> string is
+    let mut out: string = header(m) + "\n\n"
+    if m.parts.len() == 0 is
+        return out + tui::style_render(error_style(), "Na dysku nie ma partycji. Utwórz je (np. cfdisk/parted) i wróć do tego kroku.") +
+            error_block(m) + "\n" + tui::help_view(["esc"], ["wstecz"])
+    end
+    out = out + tui::colorize("Punkt montowania: /, /home, /boot, /boot/efi, swap — puste = nieużywana.", "8") + "\n\n"
+    let mut i: int = 0
+    while i < m.parts.len() is
+        let sel: bool = i == m.part_row
+        let ti: any = tui::textinput_focus(m.mp_inputs[i], sel)
+        out = out + marker(sel) + model::part_label(m.parts[i]) + "\n" +
+            "      punkt: " + tui::textinput_view(ti) + "   fs: " + fs_options()[m.part_fs[i]] + "   " +
+            (if m.part_fmt[i] then tui::colorize("[FORMATUJ]", "red") else "[zachowaj dane]") + "\n"
+        i += 1
+    end
+    return out + error_block(m) + "\n" +
+        tui::help_view(["↑/↓", "wpisz", "ctrl+k", "ctrl+d", "enter", "esc"],
+            ["partycja", "punkt montowania", "system plików", "formatuj/zachowaj", "dalej", "wstecz"])
+end
+
+fn view_profile(m: Model) -> string is
+    let ps: [model::Profile] = profiles::all()
+    let sel: int = tui::list_selected_index(m.profile_list)
+    let mut out: string = header(m) + "\n\n" + tui::list_view(m.profile_list) + "\n"
+    if sel >= 0 && sel < ps.len() && ps[sel].packages.len() > 0 is
+        out = out + tui::colorize("Pakiety: " + str::join(ps[sel].packages, ", "), "8") + "\n"
+    end
+    out = out + "\nNarzędzia programistyczne (opcjonalnie, wymagają sieci):\n" +
+        "  " + check(m.hsharp_on) + " [h] kompilator H# " + plan::hsharp_version() + "\n" +
+        "  " + check(m.bit_on) + " [b] menedżer pakietów bit " + plan::bit_version() + "\n"
+    return out + error_block(m) + "\n" +
+        tui::help_view(["↑/↓", "h", "b", "enter", "esc"], ["profil", "H#", "bit", "dalej", "wstecz"])
 end
 
 fn view_account(m: Model) -> string is
-    let admin_mark: string = if m.admin_on then "[x]" else "[ ]"
-    let admin_marker: string = if m.focus_idx == focus_admin() then "> " else "  "
     return header(m) + "\n\n" +
-        field_line("Nazwa hosta          ", m.hostname_input, m.focus_idx == focus_hostname()) + "\n" +
-        field_line("Nazwa użytkownika     ", m.username_input, m.focus_idx == focus_username()) + "\n" +
-        field_line("Imię i nazwisko       ", m.fullname_input, m.focus_idx == focus_fullname()) + "\n" +
-        field_line("Hasło                 ", m.password_input, m.focus_idx == focus_password()) + "\n" +
-        admin_marker + admin_mark + " Konto administratora (sudo)" +
+        field_line("Nazwa hosta          ", m.hostname_input, m.focus == 0) + "\n" +
+        field_line("Nazwa użytkownika    ", m.username_input, m.focus == 1) + "\n" +
+        field_line("Imię i nazwisko      ", m.fullname_input, m.focus == 2) + "\n" +
+        pw_line("Hasło               ", m.password_input, m.focus == 3, "hasło") + "\n" +
+        pw_line("Powtórz hasło       ", m.password2_input, m.focus == 4, "powtórz hasło") + "\n" +
+        marker(m.focus == 7) + check(m.admin_on) + " Konto administratora (sudo)\n\n" +
+        tui::colorize("Konto roota — puste hasło = logowanie zablokowane (zalecane):", "8") + "\n" +
+        pw_line("Hasło roota         ", m.rootpw_input, m.focus == 5, "puste = zablokowany") + "\n" +
+        pw_line("Powtórz hasło roota ", m.rootpw2_input, m.focus == 6, "powtórz hasło roota") +
         error_block(m) + "\n" +
         tui::help_view(["tab", "spacja", "enter", "esc"], ["następne pole", "przełącz admin", "dalej", "wstecz"])
 end
@@ -379,32 +1045,89 @@ fn view_summary(m: Model) -> string is
         body = body + lines[i] + "\n"
         i += 1
     end
-    let mark: string = if m.accepted then "[x]" else "[ ]"
-    return header(m) + "\n\n" + body + "\n" +
-        mark + " Rozumiem, że dysk zostanie wymazany, i chcę kontynuować (spacja)" +
+
+    let plan_lines: [string] = installer_run::preview_plan(cfg)
+    body = body + "\n" + tui::colorize("[p] plan instalacji: " + to_string(plan_lines.len()) + " kroków " +
+        (if m.show_plan then "(↑/↓ przewijanie)" else "(naciśnij p, aby rozwinąć)"), "yellow") + "\n"
+    if m.show_plan is
+        let mut k: int = m.plan_scroll
+        let mut shown: int = 0
+        while k < plan_lines.len() && shown < 14 is
+            body = body + "  " + plan_lines[k] + "\n"
+            k += 1
+            shown += 1
+        end
+        if k < plan_lines.len() is body = body + "  …\n" end
+    end
+
+    if m.resume_available is
+        body = body + "\n" + check(m.resume_on) + " [r] wznów poprzednią próbę (pomiń wykonane kroki) — odznacz, aby zacząć od zera\n"
+    end
+
+    let warn: string = if cfg.partition_mode == "auto" then "Rozumiem, że dysk zostanie wymazany, i chcę kontynuować"
+        elsif cfg.partition_mode == "alongside" then "Rozumiem, że zmiany obejmą tablicę partycji i bootloader, i chcę kontynuować"
+        else "Rozumiem, że zaznaczone partycje zostaną sformatowane, i chcę kontynuować"
+    return header(m) + "\n\n" + body + "\n" + check(m.accepted) + " " + warn + " (spacja)" +
         error_block(m) + "\n" +
-        "Instalacja jest wykonywana synchronicznie — po Enter terminal przestanie reagować aż do zakończenia.\n" +
-        tui::help_view(["spacja", "enter", "esc"], ["potwierdź", "instaluj", "wstecz"])
+        tui::help_view(["spacja", "p", "r", "enter", "esc"], ["potwierdź", "plan", "wznów", "instaluj", "wstecz"])
 end
 
 fn view_installing(m: Model) -> string is
-    return header(m) + "\n\nTrwa instalacja — nie wyłączaj komputera…\n"
+    let p: model::Progress = m.progress
+    let bar: any = tui::progress_set(tui::progress_new(50), p.percent)
+    let r: model::InstallResult = installer_run::result()
+    let mut out: string = header(m) + "\n\n" + tui::progress_view(bar) + "\n" +
+        "Krok " + to_string(p.step + 1) + " z " + to_string(p.total) + ": " + p.label + "\n\n"
+    let mut start: int = r.steps.len() - 6
+    if start < 0 is start = 0 end
+    let mut i: int = start
+    while i < r.steps.len() is
+        let s: model::InstallStepResult = r.steps[i]
+        if s.status != "skip" is
+            let mark: string = if s.status == "ok" then tui::colorize("OK    ", "green") elsif s.status == "warn" then tui::colorize("UWAGA ", "yellow") else tui::colorize("BŁĄD  ", "red")
+            out = out + mark + s.label + "\n"
+        end
+        i += 1
+    end
+    return out + "\nNie wyłączaj komputera. Instalacja działa w tle — Ctrl+C zamyka tylko to okno.\n"
+end
+
+fn last_lines(text: string, n: int) -> string is
+    let lines: [string] = str::split(text, "\n")
+    let mut start: int = lines.len() - n
+    if start < 0 is start = 0 end
+    let mut out: [string] = []
+    let mut i: int = start
+    while i < lines.len() is
+        out.push(lines[i])
+        i += 1
+    end
+    return str::join(out, "\n")
 end
 
 fn view_done(m: Model) -> string is
-    let r: model::InstallResult = m.install_result
-    let title: string = if r.success then "HackerOS został zainstalowany" else "Instalacja nie powiodła się"
+    let r: model::InstallResult = installer_run::result()
+    let title: string = if m.install_ok then "HackerOS został zainstalowany" else "Instalacja nie powiodła się"
     let mut body: string = ""
+    if !m.install_ok && r.failed_label != "" is
+        body = body + tui::style_render(error_style(), "Błąd w kroku: " + r.failed_label + " (kod wyjścia " + to_string(r.failed_code) + ")") + "\n"
+        if r.error_text != "" is body = body + tui::colorize(last_lines(r.error_text, 8), "8") + "\n" end
+        body = body + "\n"
+    end
+    if m.error_msg != "" is body = body + tui::style_render(error_style(), m.error_msg) + "\n\n" end
     let mut i: int = 0
     while i < r.steps.len() is
         let s: model::InstallStepResult = r.steps[i]
-        let mark: string = if s.ok then tui::colorize("OK  ", "green") else tui::colorize("BŁĄD", "red")
-        body = body + mark + "  " + s.label + "\n"
+        if s.status != "skip" is
+            let mark: string = if s.status == "ok" then tui::colorize("OK    ", "green") elsif s.status == "warn" then tui::colorize("UWAGA ", "yellow") else tui::colorize("BŁĄD  ", "red")
+            body = body + mark + s.label + "\n"
+        end
         i += 1
     end
+    let help: string = if m.install_ok then tui::help_view(["r", "q"], ["uruchom ponownie", "wyjście"])
+        else tui::help_view(["r", "q"], ["wznów od miejsca błędu", "wyjście"])
     return tui::style_render(title_style(), title) + "\n\n" + body +
-        "\nPełny log: " + r.log_path + "\n" +
-        tui::help_view(["dowolny klawisz"], ["wyjście"])
+        "\nPełny log: " + r.log_path + "\n" + help
 end
 
 fn view(model_in: any) -> string is
@@ -413,7 +1136,10 @@ fn view(model_in: any) -> string is
         elsif m.step == model::Step::Language then view_choice(m, m.locale_list)
         elsif m.step == model::Step::Keyboard then view_choice(m, m.keyboard_list)
         elsif m.step == model::Step::Timezone then view_choice(m, m.timezone_list)
+        elsif m.step == model::Step::Network then view_network(m)
         elsif m.step == model::Step::Disk then view_disk(m)
+        elsif m.step == model::Step::Partitions then view_partitions(m)
+        elsif m.step == model::Step::Profile then view_profile(m)
         elsif m.step == model::Step::Account then view_account(m)
         elsif m.step == model::Step::Summary then view_summary(m)
         elsif m.step == model::Step::Installing then view_installing(m)
