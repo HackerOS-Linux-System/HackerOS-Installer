@@ -1,15 +1,18 @@
 mod model
+mod util
 mod steps
 mod system_scan
+mod network
+mod profiles
 mod locales
 mod validate
 mod plan
+mod runner_embed
 mod installer_run
 mod config_io
 
 ;; Wersja rdzenia instalatora — pokazywana w obu interfejsach (ekran
-;; powitalny / stopka) tak, żeby GUI i TTY zawsze zgadzały się co do
-;; wersji, nawet gdy interfejsy same są rozwijane niezależnie.
+;; powitalny / stopka), żeby GUI i TTY zawsze zgadzały się co do wersji.
 pub fn core_version() -> string is
-    return "0.1.0"
+    return "0.2.0"
 end
