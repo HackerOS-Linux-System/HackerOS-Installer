@@ -1,129 +1,48 @@
 mod model
+mod util
 mod plan
+mod network
+mod system_scan
+mod runner_embed
 
 use "std -> process" from "process"
 use "std -> fs"       from "fs"
 use "std -> strings"  from "str"
 
-pub fn log_file_path() -> string is
-    return "/var/log/hackeros-installer.log"
-end
+;; ── Instalacja w tle ─────────────────────────────────────────────────
+;; `start` zapisuje plan + sekrety + runner.sh do katalogu stanu i uruchamia
+;; runner w osobnej sesji (setsid) — zamknięcie okna go nie zabija.
+;; Interfejsy odpytują `poll()` (≈ co 100–500 ms).
 
-;; Kroki zawierające `chpasswd` niosą hasło wprost w treści komendy —
-;; logujemy tylko etykietę, nigdy samo polecenie, dla takich kroków.
-;; `passwd -l root` (blokada konta) NIE niesie hasła, więc zostaje
-;; zalogowane normalnie.
-fn is_sensitive(cmd: string) -> bool is
-    return cmd.contains("chpasswd")
-end
+pub fn log_file_path() -> string is return "/var/log/hackeros-installer.log" end
+fn dir() -> string is return network::state_dir() end
+fn f(name: string) -> string is return dir() + "/" + name end
 
-fn log_line(text: string) is
-    fs::append(log_file_path(), text + "\n")
-end
-
-fn log_step_start(s: plan::PlanStep) is
-    if is_sensitive(s.command) is
-        log_line("$ [ukryto polecenie zawierające hasło] — " + s.label)
-    else is
-        log_line("$ " + s.command)
+;; Plan z bieżącego skanu dysku (dual-boot potrzebuje wolnego miejsca i ESP).
+fn make_plan(cfg: model::InstallConfig) -> [plan::PlanStep] is
+    let mut free: model::FreeSpace = model::FreeSpace { start_mb: 0, end_mb: 0, size_mb: 0 }
+    let mut esp: string = ""
+    let mut table: string = ""
+    if cfg.partition_mode == "alongside" is
+        free = system_scan::detect_free_space(cfg.target_disk)
+        esp = system_scan::find_esp(cfg.target_disk)
+        table = system_scan::disk_table(cfg.target_disk)
     end
+    return plan::full_plan_with(cfg, free, esp, table)
 end
 
-fn log_step_result(ok: bool, indented_output: string) is
-    if ok is
-        log_line("  -> OK")
-    else is
-        log_line("  -> BŁĄD:")
-        log_line(indented_output)
-    end
-end
-
-;; Proste wcięcie każdej linii wyjścia polecenia o cztery spacje, żeby
-;; log pozostał czytelny.
-fn indent_output(s: string) -> string is
-    let lines: [string] = str::split(s, "\n")
-    let mut out: [string] = []
+fn plan_text(steps: [plan::PlanStep]) -> string is
+    let mut lines: [string] = []
     let mut i: int = 0
-    while i < lines.len() is
-        out.push("    " + lines[i])
+    while i < steps.len() is
+        lines.push(steps[i].flags + "\t" + steps[i].label + "\t" + steps[i].command)
         i += 1
     end
-    return str::join(out, "\n")
+    return str::join(lines, "\n") + "\n"
 end
 
-;; Uruchamia jeden krok planu i zwraca jego wynik. `process::run`
-;; (patrz std/process.h#) zwraca tylko połączone stdout/stderr — bez
-;; osobnego kodu wyjścia — więc traktujemy krok jako nieudany, gdy
-;; wyjście zawiera oczywiste markery błędu powłoki. To uproszczenie
-;; (patrz komentarz w instalator_run poniżej); w praktyce każdy krok
-;; planu jest pojedynczym, prostym poleceniem, więc fałszywe trafienia
-;; są rzadkie, a `plan.h#` dobiera polecenia tak, by w normalnej pracy
-;; nigdy same z siebie nie wypisywały tekstu "command not found" ani
-;; "No such file or directory" na wyjściu standardowym w przypadku
-;; sukcesu.
-fn looks_like_failure(output: string) -> bool is
-    if output.contains("command not found") is return true end
-    if output.contains("No such file or directory") is return true end
-    if output.contains("cannot ") is return true end
-    if output.contains("Permission denied") is return true end
-    if output.contains("mkfs.") && output.contains("error") is return true end
-    return false
-end
-
-fn run_one(s: plan::PlanStep) -> model::InstallStepResult is
-    log_step_start(s)
-    let output: string = process::run(s.command + " 2>&1")
-    let ok: bool = !looks_like_failure(output)
-    log_step_result(ok, indent_output(output))
-    return model::InstallStepResult { label: s.label, ok: ok, message: if ok then "" else output }
-end
-
-pub fn run_install(cfg: model::InstallConfig, on_progress: fn(string, int, int)) -> model::InstallResult is
-    log_line("══════════════════════════════════════════════════")
-    log_line("HackerOS Installer — start instalacji (" + cfg.edition + " edition)")
-    log_line("Cel: " + cfg.target_disk + "  UEFI: " + to_string(cfg.uefi))
-    log_line("══════════════════════════════════════════════════")
-
-    let steps: [plan::PlanStep] = plan::full_plan(cfg)
-    let total: int = steps.len()
-
-    let mut results: [model::InstallStepResult] = []
-    let mut failed_label: string = ""
-    let mut i: int = 0
-
-    while i < total is
-        on_progress(steps[i].label, i, total)
-        let res: model::InstallStepResult = run_one(steps[i])
-        results.push(res)
-
-        if !res.ok is
-            failed_label = res.label
-            log_line("Instalacja przerwana na kroku: " + failed_label)
-            i = total   ;; przerywa pętlę — reszta planu nie jest wykonywana
-        else is
-            i += 1
-        end
-    end
-
-    let success: bool = failed_label == ""
-    if success is
-        log_line("Instalacja zakończona pomyślnie.")
-    end
-
-    return model::InstallResult {
-        success: success,
-        steps: results,
-        failed_label: failed_label,
-        log_path: log_file_path()
-    }
-end
-
-;; Podgląd planu bez wykonywania niczego — używane przez ekran Summary
-;; w obu interfejsach, żeby pokazać użytkownikowi dokładnie, ile kroków
-;; i jakiego rodzaju zostanie wykonanych, zanim cokolwiek nieodwracalne
-;; się wydarzy.
 pub fn preview_plan(cfg: model::InstallConfig) -> [string] is
-    let steps: [plan::PlanStep] = plan::full_plan(cfg)
+    let steps: [plan::PlanStep] = make_plan(cfg)
     let mut labels: [string] = []
     let mut i: int = 0
     while i < steps.len() is
@@ -131,4 +50,140 @@ pub fn preview_plan(cfg: model::InstallConfig) -> [string] is
         i += 1
     end
     return labels
+end
+
+fn read_kv(name: string, key: string) -> string is
+    if !fs::exists(f(name)) is return "" end
+    return str::trim(util::kv_get(fs::read(f(name)), key))
+end
+
+fn runner_alive() -> bool is
+    if !fs::exists(f("runner.pid")) is return false end
+    let pid: string = str::trim(fs::read(f("runner.pid")))
+    if !str::is_numeric(pid) is return false end
+    return util::run_rc("kill -0 " + pid).code == 0
+end
+
+fn sha_of(path: string) -> string is
+    let r: util::RunOut = util::run_rc("sha256sum " + util::sh_quote(path) + " | cut -d' ' -f1")
+    if r.code != 0 || r.output == "" is
+        let c: util::RunOut = util::run_rc("cksum " + util::sh_quote(path) + " | cut -d' ' -f1,2")
+        return c.output
+    end
+    return r.output
+end
+
+;; "running" — runner żyje; "resume" — poprzednia próba dla DOKŁADNIE tego
+;; planu zatrzymała się w połowie; "none" — start od zera.
+pub fn probe(cfg: model::InstallConfig) -> string is
+    if runner_alive() is return "running" end
+    if !fs::exists(f("checkpoint")) || !fs::exists(f("checkpoint.sha")) is return "none" end
+    if read_kv("status", "state") == "ok" is return "none" end
+    let cp: string = str::trim(fs::read(f("checkpoint")))
+    if !str::is_numeric(cp) || str_to_int(cp) <= 0 is return "none" end
+    fs::mkdir(dir())
+    fs::write(f("plan.probe"), plan_text(make_plan(cfg)))
+    let same: bool = sha_of(f("plan.probe")) == str::trim(fs::read(f("checkpoint.sha")))
+    fs::remove(f("plan.probe"))
+    if same is return "resume" end
+    return "none"
+end
+
+fn secrets_text(cfg: model::InstallConfig) -> string is
+    let mut s: string = ""
+    s = s + "HOS_USER_PW=" + util::sh_quote(cfg.user.password) + "\n"
+    s = s + "HOS_ROOT_PW=" + util::sh_quote(cfg.root_password) + "\n"
+    s = s + "HOS_LUKS_PW=" + util::sh_quote(cfg.luks_password) + "\n"
+    return s
+end
+
+;; Zwraca "" gdy uruchomiono, w przeciwnym razie komunikat błędu.
+pub fn start(cfg: model::InstallConfig, resume: bool) -> string is
+    if runner_alive() is return "Instalacja już trwa w tle." end
+    if cfg.target_disk == "" || !util::is_safe_token(cfg.target_disk) is return "Nie wybrano poprawnego dysku." end
+    if !util::has_cmd("sh") is return "Brak powłoki sh." end
+
+    fs::mkdir(dir())
+    process::run("chmod 700 " + util::sh_quote(dir()))
+    let steps: [plan::PlanStep] = make_plan(cfg)
+    if steps.len() == 0 is return "Plan instalacji jest pusty." end
+
+    fs::remove(f("status"))
+    fs::write(f("plan.tsv"), plan_text(steps))
+    ;; sekrety: plik tworzony od razu z uprawnieniami 0600, dopiero potem zapis
+    process::run("install -m 600 /dev/null " + util::sh_quote(f("secrets")))
+    fs::write(f("secrets"), secrets_text(cfg))
+    fs::write(f("runner.sh"), runner_embed::script())
+    process::run("chmod 700 " + util::sh_quote(f("runner.sh")))
+
+    let flag: string = if resume then "1" else "0"
+    process::spawn("HOS_STATE=" + util::sh_quote(dir()) + " HOS_LOG=" + util::sh_quote(log_file_path()) +
+        " setsid sh " + util::sh_quote(f("runner.sh")) + " " + flag + " >/dev/null 2>&1")
+    return ""
+end
+
+pub fn poll() -> model::Progress is
+    if !fs::exists(f("status")) is
+        return model::Progress { state: "idle", step: 0, total: 0, label: "", percent: 0 }
+    end
+    let st: string = read_kv("status", "state")
+    let step: int = util::to_int_or(read_kv("status", "step"), 0)
+    let total: int = util::to_int_or(read_kv("status", "total"), 0)
+    let label: string = read_kv("status", "label")
+    let mut state: string = st
+    if st == "running" && !runner_alive() is state = "failed" end
+    let percent: int = if state == "ok" then 100 elsif total > 0 then step * 100 / total else 0
+    return model::Progress { state: state, step: step, total: total, label: label, percent: percent }
+end
+
+pub fn result() -> model::InstallResult is
+    let mut steps: [model::InstallStepResult] = []
+    let mut failed_label: string = ""
+    let mut failed_code: int = 0
+    if fs::exists(f("results.tsv")) is
+        let lines: [string] = str::split(fs::read(f("results.tsv")), "\n")
+        let mut i: int = 0
+        while i < lines.len() is
+            if str::trim(lines[i]) != "" is
+                let c: [string] = str::split(lines[i], "\t")
+                if c.len() >= 4 is
+                    let code: int = util::to_int_or(c[2], 0)
+                    steps.push(model::InstallStepResult { label: c[3], status: c[1], code: code })
+                    if c[1] == "fail" is
+                        failed_label = c[3]
+                        failed_code = code
+                    end
+                end
+            end
+            i += 1
+        end
+    end
+    let p: model::Progress = poll()
+    if p.state == "failed" && failed_label == "" is failed_label = p.label end
+    let err: string = if fs::exists(f("error.txt")) then fs::read(f("error.txt")) else ""
+    return model::InstallResult {
+        success: p.state == "ok",
+        steps: steps,
+        failed_label: failed_label,
+        failed_code: failed_code,
+        error_text: if p.state == "failed" then err else "",
+        log_path: log_file_path()
+    }
+end
+
+pub fn warning_count(r: model::InstallResult) -> int is
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < r.steps.len() is
+        if r.steps[i].status == "warn" is n += 1 end
+        i += 1
+    end
+    return n
+end
+
+;; Ostatnie `n` linii logu instalatora (do widoku szczegółów).
+pub fn log_tail(n: int) -> string is
+    if !fs::exists(log_file_path()) is return "" end
+    let r: util::RunOut = util::run_rc("tail -n " + to_string(n) + " " + util::sh_quote(log_file_path()))
+    return r.output
 end
