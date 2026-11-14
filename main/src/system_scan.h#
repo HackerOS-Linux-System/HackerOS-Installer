@@ -1,4 +1,5 @@
 mod model
+mod util
 
 use "std -> process" from "process"
 use "std -> strings" from "str"
@@ -94,4 +95,144 @@ end
 ;; ruszy.
 pub fn free_space_gb(path: string) -> int is
     return sys::disk_free(path) / 1024 / 1024 / 1024
+end
+
+;; ── Partycje wybranego dysku ─────────────────────────────────────────
+;; `lsblk -b -n -p -P -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE,TYPE <dysk>`;
+;; bierzemy tylko wiersze TYPE="part". ESP rozpoznajemy po GUID typu partycji.
+pub fn esp_guid() -> string is return "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" end
+
+pub fn detect_partitions(disk: string) -> [model::PartInfo] is
+    let mut parts: [model::PartInfo] = []
+    if !util::is_safe_token(disk) is return parts end
+    let out: string = process::run("lsblk -b -n -p -P -o NAME,SIZE,FSTYPE,LABEL,PARTTYPE,TYPE " + util::sh_quote(disk) + " 2>/dev/null")
+    let lines: [string] = str::split(out, "\n")
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::trim(lines[i])
+        if line != "" && extract_field(line, "TYPE") == "part" is
+            let size: string = extract_field(line, "SIZE")
+            let bytes: int = if str::is_numeric(size) then str_to_int(size) else 0
+            parts.push(model::PartInfo {
+                device:  extract_field(line, "NAME"),
+                size_mb: bytes / 1024 / 1024,
+                fstype:  extract_field(line, "FSTYPE"),
+                label:   extract_field(line, "LABEL"),
+                is_esp:  str::to_lower(extract_field(line, "PARTTYPE")) == esp_guid()
+            })
+        end
+        i += 1
+    end
+    return parts
+end
+
+;; Pierwsza partycja ESP na dysku ("" gdy brak).
+pub fn find_esp(disk: string) -> string is
+    let parts: [model::PartInfo] = detect_partitions(disk)
+    let mut i: int = 0
+    while i < parts.len() is
+        if parts[i].is_esp is return parts[i].device end
+        i += 1
+    end
+    return ""
+end
+
+;; Typ tablicy partycji: "gpt" | "msdos" | "" (brak/nieznany).
+pub fn disk_table(disk: string) -> string is
+    if !util::is_safe_token(disk) is return "" end
+    let out: string = process::run("parted -s -m " + util::sh_quote(disk) + " print 2>/dev/null")
+    let lines: [string] = str::split(out, "\n")
+    if lines.len() < 2 is return "" end
+    let f: [string] = str::split(lines[1], ":")
+    if f.len() >= 6 is return str::trim(f[5]) end
+    return ""
+end
+
+;; ── Wolne miejsce (dual-boot) ────────────────────────────────────────
+;; `parted -s -m <dysk> unit MiB print free` — wiersze wolnego miejsca mają
+;; "free;" na końcu: `1:0.02MiB:1.00MiB:0.98MiB:free;`.
+fn mib_value(raw: string, round_up: bool) -> int is
+    let t: string = str::replace_all(str::trim(raw), "MiB", "")
+    let parts: [string] = str::split(t, ".")
+    let whole: int = util::to_int_or(parts[0], 0)
+    if round_up && parts.len() > 1 && util::to_int_or(parts[1], 0) > 0 is return whole + 1 end
+    return whole
+end
+
+pub fn detect_free_space(disk: string) -> model::FreeSpace is
+    let mut best: model::FreeSpace = model::FreeSpace { start_mb: 0, end_mb: 0, size_mb: 0 }
+    if disk == "" || !util::is_safe_token(disk) is return best end
+    let out: string = process::run("parted -s -m " + util::sh_quote(disk) + " unit MiB print free 2>/dev/null")
+    let lines: [string] = str::split(out, "\n")
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::trim(lines[i])
+        if line.ends_with("free;") is
+            let f: [string] = str::split(line, ":")
+            if f.len() >= 4 is
+                let st: int = mib_value(f[1], true)
+                let en: int = mib_value(f[2], false)
+                let sz: int = en - st
+                if sz > best.size_mb is
+                    best = model::FreeSpace { start_mb: st, end_mb: en, size_mb: sz }
+                end
+            end
+        end
+        i += 1
+    end
+    return best
+end
+
+;; ── Inne systemy (os-prober) ─────────────────────────────────────────
+pub fn os_prober_available() -> bool is
+    return util::has_cmd("os-prober")
+end
+
+;; Surowe wyjście os-prober (wolne — wołaj raz przy wejściu w krok Dysk).
+pub fn probe_other_os_raw() -> string is
+    if !os_prober_available() is return "" end
+    return str::trim(process::run("os-prober 2>/dev/null"))
+end
+
+;; `/dev/sda1:Windows 10:Windows:chain` (dla EFI: `/dev/sda1@/EFI/…:Windows Boot Manager:Windows:efi`)
+pub fn parse_other_os(raw: string) -> [model::OtherOs] is
+    let mut out: [model::OtherOs] = []
+    let lines: [string] = str::split(raw, "\n")
+    let mut i: int = 0
+    while i < lines.len() is
+        let line: string = str::trim(lines[i])
+        if line != "" is
+            let f: [string] = str::split(line, ":")
+            if f.len() >= 2 is
+                let dev_parts: [string] = str::split(f[0], "@")
+                out.push(model::OtherOs {
+                    device: dev_parts[0],
+                    name:   str::trim(f[1]),
+                    kind:   if f.len() >= 3 then str::trim(f[2]) else ""
+                })
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Czy `device` leży na `disk` (/dev/sda1 na /dev/sda, ale nie /dev/sdaa1).
+fn on_disk(device: string, disk: string) -> bool is
+    if disk == "" || !device.starts_with(disk) is return false end
+    let rest: string = str::slice(device, disk.len(), device.len())
+    if rest == "" is return false end
+    let c: string = rest[0..1]
+    if c == "p" is return true end
+    return c >= "0" && c <= "9"
+end
+
+pub fn other_os_on_disk(all: [model::OtherOs], disk: string) -> [model::OtherOs] is
+    let mut out: [model::OtherOs] = []
+    let mut i: int = 0
+    while i < all.len() is
+        if on_disk(all[i].device, disk) is out.push(all[i]) end
+        i += 1
+    end
+    return out
 end
