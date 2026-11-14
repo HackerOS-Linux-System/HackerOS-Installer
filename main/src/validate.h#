@@ -1,4 +1,7 @@
 mod model
+mod util
+mod network
+mod profiles
 
 use "std -> strings" from "str"
 
@@ -15,27 +18,98 @@ fn fail(msg: string) -> ValidationResult is
     return ValidationResult { ok: false, message: msg }
 end
 
-;; Nazwa użytkownika / hosta: litery, cyfry, myślnik, podkreślenie;
-;; musi zaczynać się od litery — te same reguły co `useradd`/`hostname`
-;; na większości dystrybucji Linuksa.
-fn is_valid_slug(s: string) -> bool is
-    if s == "" is return false end
-    let n: int = s.len()
-    let first: string = s[0..1]
-    let starts_lower: bool = first >= "a" && first <= "z"
-    if !starts_lower is return false end
+;; Dual-boot: minimalny wolny obszar potrzebny na nowy system.
+pub fn alongside_min_mb() -> int is return 20480 end
 
+;; "" gdy w porządku; w trybie `alongside` sprawdza ilość wolnego miejsca.
+pub fn alongside_error(cfg: model::InstallConfig, free_mb: int) -> string is
+    if cfg.partition_mode != "alongside" is return "" end
+    if free_mb < alongside_min_mb() is
+        return "Za mało wolnego miejsca na dysku (" + to_string(free_mb) + " MiB, potrzeba co najmniej " +
+            to_string(alongside_min_mb()) + " MiB). Zmniejsz partycję innego systemu (np. w GParted)."
+    end
+    return ""
+end
+
+;; Nazwa użytkownika / hosta: małe litery, cyfry, '-' i '_'; zaczyna się od litery.
+pub fn is_valid_slug(s: string) -> bool is
+    if s == "" || s.len() > 32 is return false end
+    let first: string = s[0..1]
+    if !(first >= "a" && first <= "z") is return false end
+    let n: int = s.len()
     let mut i: int = 0
     while i < n is
         let c: string = s[i..i + 1]
         let is_lower: bool = c >= "a" && c <= "z"
         let is_digit: bool = c >= "0" && c <= "9"
-        if !is_lower && !is_digit && c != "-" && c != "_" is
-            return false
-        end
+        if !is_lower && !is_digit && c != "-" && c != "_" is return false end
         i += 1
     end
     return true
+end
+
+fn has_control(s: string) -> bool is
+    return s.contains("\n") || s.contains("\r") || s.contains("\t") || s.contains(":")
+end
+
+fn valid_fs(fs: string) -> bool is
+    return fs == "ext4" || fs == "btrfs" || fs == "xfs" || fs == "vfat" || fs == "swap"
+end
+
+;; Walidacja ręcznego przypisania partycji.
+pub fn validate_manual(cfg: model::InstallConfig) -> ValidationResult is
+    let parts: [model::PartSpec] = cfg.manual_parts
+    if parts.len() == 0 is
+        return fail("Przypisz co najmniej partycję / (root).")
+    end
+    let mut has_root: bool = false
+    let mut has_efi: bool = false
+    let mut has_boot: bool = false
+    let mut i: int = 0
+    while i < parts.len() is
+        let p: model::PartSpec = parts[i]
+        if !util::is_safe_token(p.device) || !p.device.starts_with(cfg.target_disk) is
+            return fail("Partycja " + p.device + " nie należy do wybranego dysku.")
+        end
+        if !valid_fs(p.fs) is return fail("Nieobsługiwany system plików: " + p.fs) end
+        if p.mountpoint != "swap" && !(p.mountpoint.starts_with("/") && util::is_safe_token(p.mountpoint)) is
+            return fail("Nieprawidłowy punkt montowania: " + p.mountpoint)
+        end
+        if (p.mountpoint == "swap") != (p.fs == "swap") is
+            return fail("Punkt montowania „swap” i system plików „swap” muszą występować razem (" + p.device + ").")
+        end
+        if p.mountpoint == "/" is
+            has_root = true
+            if !p.format is return fail("Partycja / musi być sformatowana.") end
+            if p.fs != "ext4" && p.fs != "btrfs" && p.fs != "xfs" is
+                return fail("Partycja / musi mieć system plików ext4, btrfs lub xfs.")
+            end
+        end
+        if p.mountpoint == "/boot/efi" is
+            has_efi = true
+            if p.fs != "vfat" is return fail("Partycja /boot/efi musi być vfat.") end
+        end
+        if p.mountpoint == "/boot" is has_boot = true end
+        let mut j: int = 0
+        while j < i is
+            if parts[j].device == p.device is
+                return fail("Partycja " + p.device + " jest przypisana dwa razy.")
+            end
+            if parts[j].mountpoint == p.mountpoint && p.mountpoint != "swap" is
+                return fail("Punkt montowania " + p.mountpoint + " jest użyty dwa razy.")
+            end
+            j += 1
+        end
+        i += 1
+    end
+    if !has_root is return fail("Brakuje partycji / (root).") end
+    if cfg.uefi && !has_efi is
+        return fail("W trybie UEFI potrzebna jest partycja /boot/efi (vfat).")
+    end
+    if cfg.luks && !has_boot is
+        return fail("Przy szyfrowaniu LUKS potrzebna jest osobna, niezaszyfrowana partycja /boot.")
+    end
+    return ok()
 end
 
 pub fn validate_step(cfg: model::InstallConfig) -> ValidationResult is
@@ -57,19 +131,46 @@ pub fn validate_step(cfg: model::InstallConfig) -> ValidationResult is
             return ok()
         end
 
+        model::Step::Network => is
+            if cfg.mirror_id == "custom" && !network::is_valid_mirror_url(cfg.mirror_url) is
+                return fail("Podaj poprawny adres serwera (http:// lub https://, bez spacji i cudzysłowów).")
+            end
+            return ok()
+        end
+
         model::Step::Disk => is
             if cfg.target_disk == "" is
                 return fail("Wybierz dysk, na którym zainstalować HackerOS.")
             end
-            if !cfg.erase_disk is
-                return fail("W tej wersji instalatora obsługiwane jest tylko całkowite wymazanie wybranego dysku.")
+            if !util::is_safe_token(cfg.target_disk) is
+                return fail("Nieprawidłowa nazwa urządzenia: " + cfg.target_disk)
             end
-            if cfg.filesystem != "ext4" && cfg.filesystem != "btrfs" is
-                return fail("Nieobsługiwany system plików: " + cfg.filesystem)
+            if cfg.partition_mode != "auto" && cfg.partition_mode != "alongside" && cfg.partition_mode != "manual" is
+                return fail("Wybierz sposób partycjonowania.")
             end
-            if cfg.enable_swap && cfg.swap_size_mb <= 0 is
-                return fail("Rozmiar partycji wymiany musi być większy od zera.")
+            if cfg.partition_mode != "manual" is
+                if cfg.filesystem != "ext4" && cfg.filesystem != "btrfs" && cfg.filesystem != "xfs" is
+                    return fail("Nieobsługiwany system plików: " + cfg.filesystem)
+                end
+                if cfg.enable_swap && cfg.swap_size_mb <= 0 is
+                    return fail("Rozmiar pliku wymiany musi być większy od zera.")
+                end
             end
+            if cfg.luks is
+                if cfg.luks_password.len() < 8 is
+                    return fail("Hasło szyfrowania musi mieć co najmniej 8 znaków.")
+                end
+                if cfg.luks_password != cfg.luks_confirm is
+                    return fail("Hasła szyfrowania nie są takie same.")
+                end
+            end
+            return ok()
+        end
+
+        model::Step::Partitions => validate_manual(cfg)
+
+        model::Step::Profile => is
+            if !profiles::exists(cfg.profile) is return fail("Wybierz profil instalacji.") end
             return ok()
         end
 
@@ -80,8 +181,19 @@ pub fn validate_step(cfg: model::InstallConfig) -> ValidationResult is
             if !is_valid_slug(cfg.user.username) is
                 return fail("Nazwa użytkownika może zawierać tylko małe litery, cyfry, '-' i '_', i musi zaczynać się od litery.")
             end
-            if str::trim(cfg.user.password).len() < 4 is
+            if cfg.user.username == "root" is return fail("Nazwa „root” jest zarezerwowana.") end
+            if has_control(cfg.user.full_name) is
+                return fail("Imię i nazwisko nie może zawierać dwukropka ani znaków sterujących.")
+            end
+            if cfg.user.password.len() < 4 is
                 return fail("Hasło musi mieć co najmniej 4 znaki.")
+            end
+            if cfg.user.password != cfg.password_confirm is
+                return fail("Hasła użytkownika nie są takie same.")
+            end
+            if cfg.root_password != "" is
+                if cfg.root_password.len() < 4 is return fail("Hasło roota musi mieć co najmniej 4 znaki.") end
+                if cfg.root_password != cfg.root_confirm is return fail("Hasła roota nie są takie same.") end
             end
             return ok()
         end
