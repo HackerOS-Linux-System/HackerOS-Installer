@@ -1,25 +1,30 @@
 mod model
+mod util
 
-use "std -> json" from "json"
-use "std -> fs"    from "fs"
+use "std -> json"    from "json"
+use "std -> fs"      from "fs"
+use "std -> strings" from "str"
 
+;; ── Podsumowanie (JSON, bez haseł) ───────────────────────────────────
 pub fn to_json(cfg: model::InstallConfig) -> string is
     let mut obj: string = json::object()
     obj = json::set_str(obj, "locale", cfg.locale)
     obj = json::set_str(obj, "keyboard", cfg.keyboard)
     obj = json::set_str(obj, "timezone", cfg.timezone)
     obj = json::set_str(obj, "target_disk", cfg.target_disk)
+    obj = json::set_str(obj, "partition_mode", cfg.partition_mode)
     obj = json::set_str(obj, "filesystem", cfg.filesystem)
     obj = json::set_bool(obj, "enable_swap", cfg.enable_swap)
     obj = json::set_int(obj, "swap_size_mb", cfg.swap_size_mb)
+    obj = json::set_bool(obj, "luks", cfg.luks)
+    obj = json::set_str(obj, "profile", cfg.profile)
+    obj = json::set_str(obj, "mirror_id", cfg.mirror_id)
     obj = json::set_str(obj, "hostname", cfg.hostname)
     obj = json::set_str(obj, "username", cfg.user.username)
     obj = json::set_bool(obj, "user_is_admin", cfg.user.is_admin)
     obj = json::set_bool(obj, "uefi", cfg.uefi)
     obj = json::set_str(obj, "edition", cfg.edition)
-    ;; Celowo POMIJANE: cfg.user.password, cfg.root_password — ten plik
-    ;; jest zapisywany obok logu instalacji i nie ma powodu, żeby
-    ;; kiedykolwiek zawierał hasła w jakiejkolwiek postaci.
+    ;; Celowo POMIJANE: wszystkie hasła.
     return obj
 end
 
@@ -27,24 +32,128 @@ pub fn save_summary(cfg: model::InstallConfig, path: string) is
     fs::write(path, json::stringify_pretty(to_json(cfg), 2))
 end
 
-;; Gotowe do wyświetlenia linie "etykieta: wartość" na ekran Summary —
-;; wspólne dla Silver (renderowane jako kolejne `<p>`) i tui
-;; (złączone `\n`-ami w jeden string do `tui::style_render`).
+;; ── Zapis do wznawiania (klucz=wartość, bez haseł) ───────────────────
+pub fn resume_path() -> string is return "/var/lib/hackeros-installer/resume.conf" end
+
+pub fn has_resume_config() -> bool is return fs::exists(resume_path()) end
+
+pub fn clear_resume_config() is
+    if fs::exists(resume_path()) is fs::remove(resume_path()) end
+end
+
+fn b(v: bool) -> string is return if v then "1" else "0" end
+
+fn line(key: string, val: string) -> string is
+    return key + "=" + util::one_line(val) + "\n"
+end
+
+pub fn save_resume(cfg: model::InstallConfig) is
+    fs::mkdir("/var/lib/hackeros-installer")
+    let mut s: string = ""
+    s = s + line("locale", cfg.locale) + line("keyboard", cfg.keyboard) + line("timezone", cfg.timezone)
+    s = s + line("mirror_id", cfg.mirror_id) + line("mirror_url", cfg.mirror_url)
+    s = s + line("target_disk", cfg.target_disk) + line("partition_mode", cfg.partition_mode)
+    s = s + line("filesystem", cfg.filesystem) + line("enable_swap", b(cfg.enable_swap))
+    s = s + line("swap_size_mb", to_string(cfg.swap_size_mb)) + line("luks", b(cfg.luks))
+    s = s + line("profile", cfg.profile) + line("install_hsharp", b(cfg.install_hsharp)) + line("install_bit", b(cfg.install_bit))
+    s = s + line("hostname", cfg.hostname) + line("username", cfg.user.username)
+    s = s + line("full_name", cfg.user.full_name) + line("is_admin", b(cfg.user.is_admin))
+    let mut i: int = 0
+    while i < cfg.manual_parts.len() is
+        let p: model::PartSpec = cfg.manual_parts[i]
+        s = s + line("part", p.device + "|" + p.mountpoint + "|" + p.fs + "|" + b(p.format))
+        i += 1
+    end
+    fs::write(resume_path(), s)
+end
+
+fn parts_from(text: string) -> [model::PartSpec] is
+    let mut out: [model::PartSpec] = []
+    let lines: [string] = str::split(text, "\n")
+    let mut i: int = 0
+    while i < lines.len() is
+        if lines[i].starts_with("part=") is
+            let f: [string] = str::split(str::slice(lines[i], 5, lines[i].len()), "|")
+            if f.len() >= 4 is
+                out.push(model::PartSpec { device: f[0], mountpoint: f[1], fs: f[2], format: f[3] == "1" })
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Wczytuje zapisaną konfigurację na wierzch `base` (hasła zostają puste).
+pub fn load_resume(base: model::InstallConfig) -> model::InstallConfig is
+    if !fs::exists(resume_path()) is return base end
+    let t: string = fs::read(resume_path())
+    let mut c: model::InstallConfig = base
+    if util::kv_get(t, "locale") != "" is c.locale = util::kv_get(t, "locale") end
+    if util::kv_get(t, "keyboard") != "" is c.keyboard = util::kv_get(t, "keyboard") end
+    if util::kv_get(t, "timezone") != "" is c.timezone = util::kv_get(t, "timezone") end
+    if util::kv_get(t, "mirror_id") != "" is c.mirror_id = util::kv_get(t, "mirror_id") end
+    c.mirror_url = util::kv_get(t, "mirror_url")
+    c.target_disk = util::kv_get(t, "target_disk")
+    if util::kv_get(t, "partition_mode") != "" is c.partition_mode = util::kv_get(t, "partition_mode") end
+    if util::kv_get(t, "filesystem") != "" is c.filesystem = util::kv_get(t, "filesystem") end
+    c.enable_swap = util::kv_get(t, "enable_swap") == "1"
+    c.swap_size_mb = util::to_int_or(util::kv_get(t, "swap_size_mb"), c.swap_size_mb)
+    c.luks = util::kv_get(t, "luks") == "1"
+    if util::kv_get(t, "profile") != "" is c.profile = util::kv_get(t, "profile") end
+    c.install_hsharp = util::kv_get(t, "install_hsharp") == "1"
+    c.install_bit = util::kv_get(t, "install_bit") == "1"
+    if util::kv_get(t, "hostname") != "" is c.hostname = util::kv_get(t, "hostname") end
+    c.user.username = util::kv_get(t, "username")
+    c.user.full_name = util::kv_get(t, "full_name")
+    c.user.is_admin = util::kv_get(t, "is_admin") != "0"
+    c.manual_parts = parts_from(t)
+    return c
+end
+
+;; ── Linie podsumowania (wspólne dla GUI i TTY) ───────────────────────
+fn mode_text(cfg: model::InstallConfig) -> string is
+    if cfg.partition_mode == "alongside" is return "obok istniejących systemów (dual-boot)" end
+    if cfg.partition_mode == "manual" is return "ręcznie (własne partycje)" end
+    return "wymazanie całego dysku"
+end
+
 pub fn summary_lines(cfg: model::InstallConfig) -> [string] is
     let mut lines: [string] = []
     lines.push("Język: " + cfg.locale)
     lines.push("Klawiatura: " + cfg.keyboard)
     lines.push("Strefa czasowa: " + cfg.timezone)
-    lines.push("Dysk docelowy: " + cfg.target_disk + " (zostanie CAŁKOWICIE wymazany)")
-    lines.push("System plików: " + cfg.filesystem)
-    if cfg.enable_swap is
-        lines.push("Plik wymiany: " + to_string(cfg.swap_size_mb) + " MiB")
-    else is
-        lines.push("Plik wymiany: wyłączony")
+    lines.push("Internet: " + if cfg.online then "połączono" else "offline")
+    if cfg.mirror_id != "default" is
+        lines.push("Serwer pakietów: " + if cfg.mirror_id == "custom" then cfg.mirror_url else cfg.mirror_id)
     end
+    lines.push("Dysk docelowy: " + cfg.target_disk)
+    lines.push("Partycjonowanie: " + mode_text(cfg))
+    if cfg.partition_mode == "auto" is
+        lines.push("Uwaga: dysk " + cfg.target_disk + " zostanie CAŁKOWICIE wymazany")
+    end
+    if cfg.partition_mode != "manual" is
+        lines.push("System plików: " + cfg.filesystem)
+        if cfg.enable_swap is
+            lines.push("Plik wymiany: " + to_string(cfg.swap_size_mb) + " MiB")
+        else is
+            lines.push("Plik wymiany: wyłączony")
+        end
+    else is
+        let mut i: int = 0
+        while i < cfg.manual_parts.len() is
+            let p: model::PartSpec = cfg.manual_parts[i]
+            lines.push("  " + p.device + " → " + p.mountpoint + " (" + p.fs + (if p.format then ", formatuj)" else ", zachowaj dane)"))
+            i += 1
+        end
+    end
+    lines.push("Szyfrowanie dysku: " + if cfg.luks then "LUKS2" else "wyłączone")
+    lines.push("Profil: " + cfg.profile)
+    if cfg.install_hsharp is lines.push("Narzędzia: kompilator H#") end
+    if cfg.install_bit is lines.push("Narzędzia: menedżer pakietów bit") end
     lines.push("Nazwa hosta: " + cfg.hostname)
     lines.push("Użytkownik: " + cfg.user.username +
         if cfg.user.is_admin then " (administrator)" else " (zwykły użytkownik)")
+    lines.push("Konto roota: " + if cfg.root_password == "" then "zablokowane (sudo)" else "z hasłem")
     lines.push("Tryb rozruchu: " + if cfg.uefi then "UEFI" else "BIOS/Legacy")
     return lines
 end
