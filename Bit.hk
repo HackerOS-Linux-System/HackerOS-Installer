@@ -1,6 +1,6 @@
 [package]
 -> name        => hackeros-installer
--> version     => 0.2.0
+-> version     => 0.3.0
 -> description => Instalator HackerOS: rdzeń (main) + GUI Silver (standard) + TTY tui (server-edition)
 -> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => GPL-3.0
@@ -14,6 +14,9 @@
 -> test
 --> run => sh tests/test_runner.sh
 --> description => Testy wykonawcy planu instalacji (prawdziwy sh, bez H#)
+-> test-frontend
+--> run => cd standard/frontend && npm install --no-audit --no-fund && npm run typecheck && npm test
+--> description => Typy TypeScript + test dymny interfejsu Solid (jsdom)
 -> embed
 --> run => python3 tools/embed_runner.py
 --> description => Przegeneruj main/src/runner_embed.h# z main/runtime/runner.sh
