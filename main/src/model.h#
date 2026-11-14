@@ -3,19 +3,22 @@ pub enum Step is
     Language
     Keyboard
     Timezone
+    Network
     Disk
+    Partitions
+    Profile
     Account
     Summary
     Installing
     Done
 end
 
-;; ── Dysk wykryty w systemie (system_scan::detect_disks) ───────────────
+;; ── Sprzęt ───────────────────────────────────────────────────────────
 pub struct Disk is
-    pub device:    string   ;; np. "/dev/sda", "/dev/nvme0n1"
-    pub model:     string   ;; etykieta modelu z lsblk, "" jeśli nieznana
+    pub device:    string   ;; "/dev/sda", "/dev/nvme0n1"
+    pub model:     string
     pub size_gb:   int
-    pub removable: bool     ;; dysk USB/wymienny — instalator ostrzega przed takim celem
+    pub removable: bool
 end
 
 pub fn disk_label(d: Disk) -> string is
@@ -26,94 +29,163 @@ pub fn disk_label(d: Disk) -> string is
     return base
 end
 
-;; ── Konto użytkownika tworzone podczas instalacji ──────────────────────
+pub struct PartInfo is
+    pub device:  string   ;; "/dev/sda1"
+    pub size_mb: int
+    pub fstype:  string   ;; "" gdy brak systemu plików
+    pub label:   string
+    pub is_esp:  bool
+end
+
+pub fn part_label(p: PartInfo) -> string is
+    let fs: string = if p.fstype == "" then "brak systemu plików" else p.fstype
+    let lb: string = if p.label == "" then "" else "  [" + p.label + "]"
+    return p.device + "  —  " + to_string(p.size_mb) + " MiB  —  " + fs + lb
+end
+
+;; Największy wolny obszar na dysku (parted, jednostki MiB).
+pub struct FreeSpace is
+    pub start_mb: int
+    pub end_mb:   int
+    pub size_mb:  int
+end
+
+;; Inny system wykryty przez os-prober ("/dev/sda1:Windows 10:Windows:chain").
+pub struct OtherOs is
+    pub device: string
+    pub name:   string
+    pub kind:   string
+end
+
+pub fn other_os_label(o: OtherOs) -> string is
+    return o.name + "  (" + o.device + ")"
+end
+
+;; ── Sieć ─────────────────────────────────────────────────────────────
+pub struct WifiNet is
+    pub ssid:     string
+    pub signal:   int
+    pub security: string   ;; "" = sieć otwarta
+    pub in_use:   bool
+end
+
+pub fn wifi_label(n: WifiNet) -> string is
+    let sec: string = if n.security == "" then "otwarta" else n.security
+    let cur: string = if n.in_use then "  ✓ połączono" else ""
+    return n.ssid + "  —  " + to_string(n.signal) + "%  —  " + sec + cur
+end
+
+pub struct Mirror is
+    pub id:    string
+    pub label: string
+    pub url:   string
+end
+
+;; ── Profile ──────────────────────────────────────────────────────────
+pub struct Profile is
+    pub id:          string
+    pub label:       string
+    pub description: string
+    pub image:       string
+    pub packages:    [string]
+end
+
+;; ── Partycje ręczne ──────────────────────────────────────────────────
+pub struct PartSpec is
+    pub device:     string
+    pub mountpoint: string   ;; "/", "/home", "/boot", "/boot/efi", "swap"
+    pub fs:         string   ;; ext4 | btrfs | xfs | vfat | swap
+    pub format:     bool
+end
+
+;; ── Konto ────────────────────────────────────────────────────────────
 pub struct UserAccount is
     pub username:  string
     pub full_name: string
-    ;; Hasło w postaci jawnej — tak jak je wpisano w formularzu/prompt.
-    ;; Haszowane dopiero wewnątrz `installer_run::run_install` (przez
-    ;; `openssl passwd -6`) tuż przed zapisem do zainstalowanego
-    ;; systemu; nigdy nie trafia na dysk w tej postaci i nigdy nie jest
-    ;; logowane (patrz installer_run.h#'s `log_step`, które świadomie
-    ;; pomija argumenty haseł).
-    pub password:  string
-    pub is_admin:  bool     ;; dodać do grupy administracyjnej (sudo/wheel)?
+    pub password:  string   ;; jawne tylko w pamięci; na dysk trafia haszowane (hos_set_pw)
+    pub is_admin:  bool
 end
 
 pub fn empty_user() -> UserAccount is
     return UserAccount { username: "", full_name: "", password: "", is_admin: true }
 end
 
-;; ── Pełna konfiguracja instalacji ───────────────────────────────────────
+;; ── Pełna konfiguracja ───────────────────────────────────────────────
 pub struct InstallConfig is
     pub step: Step
 
-    ;; Regionalizacja
-    pub locale:   string   ;; np. "pl_PL.UTF-8"
-    pub keyboard: string   ;; np. "pl"
-    pub timezone: string   ;; np. "Europe/Warsaw"
+    pub locale:   string
+    pub keyboard: string
+    pub timezone: string
 
-    ;; Dysk i partycjonowanie
-    pub target_disk:  string   ;; wybrane urządzenie, np. "/dev/sda" — "" = brak wyboru
-    pub erase_disk:   bool     ;; true = automatyczne partycjonowanie całego dysku (jedyny obsługiwany tryb w v0.1)
-    pub filesystem:   string   ;; "ext4" | "btrfs"
-    pub enable_swap:  bool
-    pub swap_size_mb: int
+    pub online:     bool
+    pub mirror_id:  string
+    pub mirror_url: string
 
-    ;; System i konto
-    pub hostname:     string
-    pub user:         UserAccount
-    pub root_password: string   ;; "" = brak osobnego hasła roota (tylko sudo z konta użytkownika)
+    pub target_disk:    string
+    pub partition_mode: string      ;; "auto" | "alongside" | "manual"
+    pub filesystem:     string      ;; ext4 | btrfs | xfs (root w auto/alongside)
+    pub enable_swap:    bool
+    pub swap_size_mb:   int
+    pub luks:           bool
+    pub luks_password:  string
+    pub luks_confirm:   string
+    pub manual_parts:   [PartSpec]
 
-    ;; Wykryte automatycznie (system_scan.h#), nie edytowane przez użytkownika
-    pub uefi: bool
+    pub profile:         string
+    pub install_hsharp:  bool
+    pub install_bit:     bool
 
-    ;; Tylko etykieta w logu/podsumowaniu — "standard" albo "server"
+    pub hostname:         string
+    pub user:             UserAccount
+    pub password_confirm: string
+    pub root_password:    string
+    pub root_confirm:     string
+
+    pub uefi:    bool
     pub edition: string
 
-    ;; Ekran podsumowania musi zostać jawnie zaakceptowany zanim
-    ;; instalacja właściwa (installer_run::run_install) w ogóle ruszy —
-    ;; patrz validate::validate_step dla Step::Summary.
     pub accepted_summary: bool
+    pub resume_available: bool
+    pub resume:           bool
 end
 
 pub fn default_config(edition: string) -> InstallConfig is
     return InstallConfig {
         step: Step::Welcome,
-
-        locale:   "en_US.UTF-8",
-        keyboard: "us",
-        timezone: "UTC",
-
-        target_disk:  "",
-        erase_disk:   true,
-        filesystem:   "ext4",
-        enable_swap:  true,
-        swap_size_mb: 2048,
-
-        hostname: "hackeros",
-        user: empty_user(),
-        root_password: "",
-
-        uefi: false,
-
-        edition: edition,
-
-        accepted_summary: false
+        locale: "en_US.UTF-8", keyboard: "us", timezone: "UTC",
+        online: false, mirror_id: "default", mirror_url: "",
+        target_disk: "", partition_mode: "auto", filesystem: "ext4",
+        enable_swap: true, swap_size_mb: 2048,
+        luks: false, luks_password: "", luks_confirm: "", manual_parts: [],
+        profile: "minimal", install_hsharp: false, install_bit: false,
+        hostname: "hackeros", user: empty_user(), password_confirm: "",
+        root_password: "", root_confirm: "",
+        uefi: false, edition: edition,
+        accepted_summary: false, resume_available: false, resume: false
     }
 end
 
-;; ── Wynik pojedynczego kroku instalacji właściwej (installer_run.h#) ───
-pub struct InstallStepResult is
-    pub label:   string   ;; opis kroku pokazywany w UI, np. "Formatowanie /dev/sda1"
-    pub ok:      bool
-    pub message: string   ;; szczegóły błędu, "" gdy ok
+;; ── Postęp i wynik instalacji w tle ──────────────────────────────────
+pub struct Progress is
+    pub state:   string   ;; "idle" | "running" | "ok" | "failed"
+    pub step:    int
+    pub total:   int
+    pub label:   string
+    pub percent: int
 end
 
-;; ── Wynik całej instalacji ──────────────────────────────────────────────
+pub struct InstallStepResult is
+    pub label:  string
+    pub status: string   ;; "ok" | "warn" | "fail" | "skip"
+    pub code:   int
+end
+
 pub struct InstallResult is
     pub success:      bool
     pub steps:        [InstallStepResult]
-    pub failed_label:  string   ;; label kroku, na którym przerwano, "" gdy success
-    pub log_path:      string
+    pub failed_label: string
+    pub failed_code:  int
+    pub error_text:   string
+    pub log_path:     string
 end
