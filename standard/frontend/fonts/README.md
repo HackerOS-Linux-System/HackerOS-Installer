@@ -1,23 +1,15 @@
 # frontend/fonts/
 
-Silver nie potrafi narysować żadnego tekstu bez załadowanego fontu
-(patrz `app::with_font` w `silver-main/src/app.h#` i uwaga w README
-biblioteki `silver`). Ten katalog jest celowo pusty w repozytorium —
-dodaj tu dowolny plik `.ttf` przed uruchomieniem `standard-edition`,
-np.:
+Silver rysuje tekst fontem ładowanym przez `app::with_font`
+(`standard/src/main.h#` → `frontend/fonts/DejaVuSans.ttf`).
 
-```
-curl -L -o frontend/fonts/DejaVuSans.ttf \
-    https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf
-```
+W repozytorium jest **DejaVu Sans 2.37** (wydanie oficjalne, licencja w
+`DejaVu-LICENSE.txt` — swobodna redystrybucja). Zawiera polskie znaki
+diakrytyczne (ą ć ę ł ń ó ś ź ż) oraz symbole używane w interfejsie
+(✓ • · — „ ” … →).
 
-i upewnij się, że `standard/src/main.h#` wskazuje na właściwą nazwę
-pliku w wywołaniu:
-
-```
-a = app::with_font(a, "frontend/fonts/DejaVuSans.ttf", 16)
-```
-
-Instalator używa polskich znaków diakrytycznych (ą, ć, ę, ł, ń, ó, ś,
-ź, ż) w interfejsie — wybierz font, który je obsługuje (DejaVu Sans,
-Noto Sans itp.).
+Chcesz inny font? Podmień plik `.ttf` o tej samej nazwie albo zmień
+`font_path()` w `standard/src/main.h#`. Wybierz font, który obsługuje
+polskie znaki (DejaVu Sans, Noto Sans itp.). Gdy pliku nie ma, GUI
+startuje bez `with_font` (domyślny font Silvera) — ale wtedy nie mamy
+gwarancji, że wszystkie polskie znaki się wyświetlą.
