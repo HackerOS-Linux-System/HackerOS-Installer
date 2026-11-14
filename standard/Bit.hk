@@ -1,7 +1,7 @@
 [package]
 -> name        => hackeros-installer-standard
--> version     => 0.2.0
--> description => Graficzny instalator HackerOS (Standard Edition). Napisany w Silver 0.4 + H#; cała logika instalacji pochodzi z pakietu `main` (patrz [layout] -> include).
+-> version     => 0.3.0
+-> description => Graficzny instalator HackerOS (Standard Edition). Interfejs: TypeScript + Solid.js (esbuild), powłoka: Silver 0.4 + H#; cała logika instalacji pochodzi z pakietu `main` (patrz [layout] -> include).
 -> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => GPL-3.0
 -> lang        => h#
@@ -25,7 +25,22 @@
 -> emit    => bin
 -> run     => false
 
+[hooks]
+-> pre-build => cd frontend && npm install --no-audit --no-fund && npm run build
+
 [commands]
 -> dev
 --> run => bit run
 --> description => Uruchom instalator (GUI) w trybie podglądu
+-> frontend
+--> run => cd frontend && npm install --no-audit --no-fund && npm run build
+--> description => Zbuduj interfejs (TypeScript + Solid → frontend/dist/app.js)
+-> watch
+--> run => cd frontend && npm run watch
+--> description => Buduj interfejs przy każdej zmianie
+-> typecheck
+--> run => cd frontend && npm install --no-audit --no-fund && npm run typecheck
+--> description => Sprawdź typy TypeScript (tsc --noEmit)
+-> test-frontend
+--> run => cd frontend && npm install --no-audit --no-fund && npm test
+--> description => Test dymny interfejsu w jsdom z atrapą mostu `silver` (cały kreator)
