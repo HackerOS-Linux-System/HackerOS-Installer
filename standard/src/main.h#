@@ -1,7 +1,7 @@
 use "bit -> silver" from "silver"
-use "std -> sync"    from "sync"
 use "std -> strings" from "str"
 use "std -> process" from "process"
+use "std -> fs"      from "fs"
 
 mod model
 mod util
@@ -18,1111 +18,452 @@ mod config_io
 
 ;; ── Instalator HackerOS — Standard Edition (Silver 0.4) ───────────────
 ;;
-;; Architektura:
-;;  * Handlery on-click tylko ustawiają atomiki (`act` + `act_arg`), tick
-;;    (co ~100 ms) je odbiera i zmienia stan. Dzięki temu cała logika leży w
-;;    jednym miejscu, a handlery nie potrzebują dostępu do `App`.
-;;  * Instalacja biegnie w TLE (installer_run::start → runner.sh); tick tylko
-;;    odpytuje `poll()`, więc okno nigdy nie zamarza, a pasek postępu płynie.
-;;  * Strona jest przerysowywana TYLKO gdy coś się zmieniło (flaga `dirty`) —
-;;    pola tekstowe nie tracą kursora. Wpisane wartości są przechwytywane do
-;;    stanu aplikacji (`v_<id>`) przed każdym przerysowaniem, więc nawigacja
-;;    wstecz/dalej nie czyści formularzy.
-;;  * Pola haseł to prawdziwe <input type="password"> (Silver ≥ 0.3).
+;; Architektura 0.3: interfejs jest napisany w TypeScript + Solid.js
+;; (frontend/src → esbuild → frontend/dist/app.js). Cały STAN kreatora żyje
+;; po stronie frontendu (sygnały Solida), a ten plik jest cienką,
+;; BEZSTANOWĄ warstwą komend: każda komenda dostaje JSON, woła rdzeń
+;; (pakiet `main`) i zwraca JSON. Typowany kontrakt: frontend/src/api.ts.
+;;
+;;  * Instalacja biegnie w TLE (installer_run::start → runner.sh); frontend
+;;    odpytuje `poll_install` timerem — okno nigdy nie zamarza.
+;;  * Hasła przechodzą przez most tylko w pamięci (start_install) i trafiają
+;;    do pliku sekretów 0600, nigdy do planu ani logu.
+;;  * Wspólna walidacja (`validate_step`) jest tą samą, której używa TTY.
+;;
+;; UWAGA: w literałach H# klamry podwajamy; JSON budujemy przez data::*.
 
-;; ── stałe ────────────────────────────────────────────────────────────
+;; ── pomocnicze: JSON ─────────────────────────────────────────────────
 
-fn locale_count() -> int   is return locales::locale_codes().len() end
-fn keyboard_count() -> int is return locales::keyboard_codes().len() end
-fn timezone_count() -> int is return locales::timezone_codes().len() end
-
-fn max_parts() -> int is return 12 end
-fn fs_options() -> [string] is return ["ext4", "btrfs", "xfs", "vfat", "swap"] end
-fn root_fs_options() -> [string] is return ["ext4", "btrfs", "xfs"] end
-fn mode_ids() -> [string] is return ["auto", "alongside", "manual"] end
-fn mode_labels() -> [string] is
-    return ["Wymaż cały dysk", "Obok istniejących systemów", "Ręcznie"]
+fn arr(items: [string]) -> string is
+    return "[" + str::join(items, ",") + "]"
 end
 
-fn html_escape(s: string) -> string is
-    let mut out: string = s
-    out = str::replace_all(out, "&", "&amp;")
-    out = str::replace_all(out, "<", "&lt;")
-    out = str::replace_all(out, ">", "&gt;")
-    out = str::replace_all(out, "\"", "&quot;")
-    return out
+fn ok_obj() -> string is
+    return data::set_bool(data::object(), "ok", true)
 end
 
-fn mark_dirty() is sync::atomic_store("dirty", 1) end
-
-;; Numer z końca id elementu: "pick_disk_3" → 3.
-fn suffix_int(args: string) -> int is
-    let id: string = data::get_str(args, "id")
-    let parts: [string] = str::split(id, "_")
-    return util::to_int_or(parts[parts.len() - 1], 0)
+fn err_obj(msg: string) -> string is
+    let o: string = data::set_bool(data::object(), "ok", false)
+    return data::set_str(o, "error", msg)
 end
 
-fn queue(code: int, arg: int) is
-    sync::atomic_store("act_arg", arg)
-    sync::atomic_store("act", code)
+fn b2(v: bool) -> int is
+    if v is return 1 end
+    return 0
 end
 
-;; ── handlery on-click ────────────────────────────────────────────────
-
-fn go_next(args: string) -> string is sync::atomic_store("want_next", 1) return "{}" end
-fn go_prev(args: string) -> string is sync::atomic_store("want_prev", 1) return "{}" end
-
-fn h_cycle_prev(args: string) -> string is queue(1, -1) return "{}" end
-fn h_cycle_next(args: string) -> string is queue(1, 1)  return "{}" end
-fn h_pick_disk(args: string)  -> string is queue(2, suffix_int(args)) return "{}" end
-fn h_mode(args: string)       -> string is queue(3, suffix_int(args)) return "{}" end
-fn h_fs(args: string)         -> string is queue(4, suffix_int(args)) return "{}" end
-fn h_toggle(args: string)     -> string is queue(5, suffix_int(args)) return "{}" end
-fn h_pick_wifi(args: string)  -> string is queue(6, suffix_int(args)) return "{}" end
-fn h_wifi_scan(args: string)  -> string is queue(7, 0) return "{}" end
-fn h_wifi_connect(args: string) -> string is queue(8, 0) return "{}" end
-fn h_net_check(args: string)  -> string is queue(9, 0) return "{}" end
-fn h_pick_mirror(args: string) -> string is queue(10, suffix_int(args)) return "{}" end
-fn h_pick_profile(args: string) -> string is queue(11, suffix_int(args)) return "{}" end
-fn h_os_rescan(args: string)  -> string is queue(12, 0) return "{}" end
-fn h_pfs(args: string)        -> string is queue(13, suffix_int(args)) return "{}" end
-fn h_pfmt(args: string)       -> string is queue(14, suffix_int(args)) return "{}" end
-fn h_gparted(args: string)    -> string is queue(15, 0) return "{}" end
-fn h_load_resume(args: string) -> string is queue(16, 0) return "{}" end
-fn h_retry(args: string)      -> string is queue(17, 0) return "{}" end
-
-fn do_reboot(args: string) -> string is
-    process::run("reboot")
-    return "{}"
-end
-
-;; Indeksy przełączników (id="tg_<n>").
-fn tg_swap() -> int is return 0 end
-fn tg_luks() -> int is return 1 end
-fn tg_admin() -> int is return 2 end
-fn tg_accept() -> int is return 3 end
-fn tg_hsharp() -> int is return 4 end
-fn tg_bit() -> int is return 5 end
-fn tg_plan() -> int is return 6 end
-fn tg_resume() -> int is return 7 end
-
-fn tg_name(n: int) -> string is
-    let names: [string] = ["swap_on", "luks_on", "admin_on", "accepted", "hsharp_on", "bit_on", "show_plan", "resume_on"]
-    return names[n]
-end
-
-;; ── stan formularza ──────────────────────────────────────────────────
-
-fn v(a: app::App, id: string) -> string is
-    return app::state(a, "v_" + id)
-end
-
-fn set_v(a: app::App, id: string, val: string) -> app::App is
-    return app::set_state(a, "v_" + id, val)
-end
-
-fn capture(a: app::App, id: string) -> app::App is
-    return set_v(a, id, app::input_value(a, id))
-end
-
-;; Przechwytuje pola tekstowe widoczne na bieżącym kroku.
-fn capture_inputs(app_in: app::App, step: model::Step) -> app::App is
-    let mut a: app::App = app_in
-    match step is
-        ;; Pole przechwytujemy tylko wtedy, gdy jest NA EKRANIE — nieobecny węzeł
-        ;; zwróciłby "" i skasował wcześniej wpisaną (albo wczytaną) wartość.
-        model::Step::Network => is
-            if app::state(a, "wifi_ssid") != "" && app::state(a, "wifi_open") != "1" is a = capture(a, "wifi_pw") end
-            if network::mirror_ids()[sync::atomic_load("mirror_idx")] == "custom" is a = capture(a, "mirror_url") end
-        end
-        model::Step::Disk => is
-            if flag("swap_on") && sync::atomic_load("mode_idx") != 2 is a = capture(a, "swap_mb") end
-            if flag("luks_on") is
-                a = capture(a, "luks_pw")
-                a = capture(a, "luks_pw2")
-            end
-        end
-        model::Step::Partitions => is
-            let mut i: int = 0
-            while i < max_parts() is
-                a = capture(a, "mp_" + to_string(i))
-                i += 1
-            end
-        end
-        model::Step::Account => is
-            a = capture(a, "hostname")
-            a = capture(a, "username")
-            a = capture(a, "fullname")
-            a = capture(a, "password")
-            a = capture(a, "password2")
-            a = capture(a, "rootpw")
-            a = capture(a, "rootpw2")
-        end
-        _ => a = a
+fn lbl(codes: [string], labels: [string]) -> string is
+    let mut items: [string] = []
+    let mut i: int = 0
+    while i < codes.len() is
+        let o: string = data::set_str(data::object(), "code", codes[i])
+        items.push(data::set_str(o, "label", labels[i]))
+        i += 1
     end
-    return a
+    return arr(items)
 end
 
-fn flag(name: string) -> bool is return sync::atomic_load(name) == 1 end
+;; ── konfiguracja: JSON ↔ InstallConfig ───────────────────────────────
 
-fn disks_now() -> [model::Disk] is return system_scan::detect_disks() end
-
-fn current_disk() -> string is
-    let disks: [model::Disk] = disks_now()
-    let idx: int = sync::atomic_load("disk_idx")
-    if idx >= 0 && idx < disks.len() is return disks[idx].device end
-    return ""
-end
-
-fn current_parts(a: app::App) -> [model::PartInfo] is
-    let disk: string = current_disk()
-    if disk == "" is return [] end
-    let all: [model::PartInfo] = system_scan::detect_partitions(disk)
-    if all.len() > max_parts() is
-        let mut cut: [model::PartInfo] = []
-        let mut i: int = 0
-        while i < max_parts() is
-            cut.push(all[i])
-            i += 1
-        end
-        return cut
-    end
-    return all
-end
-
-;; ── budowanie InstallConfig z bieżącego stanu ────────────────────────
-
-fn build_cfg(a: app::App) -> model::InstallConfig is
+fn cfg_from(raw: string) -> model::InstallConfig is
+    let c: string = data::get_raw(raw, "config")
     let mut cfg: model::InstallConfig = model::default_config("standard")
-    cfg.step = steps::step_from_index(sync::atomic_load("step"))
+    cfg.step = steps::step_from_index(data::get_int(c, "step"))
+    cfg.locale = data::get_str(c, "locale")
+    cfg.keyboard = data::get_str(c, "keyboard")
+    cfg.timezone = data::get_str(c, "timezone")
+    cfg.online = data::get_bool(c, "online")
+    cfg.mirror_id = data::get_str(c, "mirror_id")
+    cfg.mirror_url = str::trim(data::get_str(c, "mirror_url"))
+    cfg.target_disk = data::get_str(c, "target_disk")
+    cfg.partition_mode = data::get_str(c, "partition_mode")
+    cfg.filesystem = data::get_str(c, "filesystem")
+    cfg.enable_swap = data::get_bool(c, "enable_swap")
+    cfg.swap_size_mb = data::get_int(c, "swap_size_mb")
+    cfg.luks = data::get_bool(c, "luks")
+    cfg.luks_password = data::get_str(c, "luks_password")
+    cfg.luks_confirm = data::get_str(c, "luks_confirm")
+    cfg.profile = data::get_str(c, "profile")
+    cfg.install_hsharp = data::get_bool(c, "install_hsharp")
+    cfg.install_bit = data::get_bool(c, "install_bit")
+    cfg.hostname = str::trim(data::get_str(c, "hostname"))
+    cfg.user.username = str::trim(data::get_str(c, "username"))
+    cfg.user.full_name = data::get_str(c, "full_name")
+    cfg.user.password = data::get_str(c, "password")
+    cfg.user.is_admin = data::get_bool(c, "is_admin")
+    cfg.password_confirm = data::get_str(c, "password_confirm")
+    cfg.root_password = data::get_str(c, "root_password")
+    cfg.root_confirm = data::get_str(c, "root_confirm")
+    cfg.uefi = system_scan::detect_uefi()
+    cfg.accepted_summary = data::get_bool(c, "accepted_summary")
+    cfg.resume_available = data::get_bool(c, "resume_available")
+    cfg.resume = data::get_bool(c, "resume")
 
-    cfg.locale   = locales::locale_codes()[sync::atomic_load("locale_idx")]
-    cfg.keyboard = locales::keyboard_codes()[sync::atomic_load("keyboard_idx")]
-    cfg.timezone = locales::timezone_codes()[sync::atomic_load("timezone_idx")]
-
-    cfg.online = flag("online")
-    let mirrors: [model::Mirror] = network::mirrors()
-    let m_idx: int = sync::atomic_load("mirror_idx")
-    cfg.mirror_id = if m_idx >= 0 && m_idx < mirrors.len() then mirrors[m_idx].id else "default"
-    cfg.mirror_url = str::trim(v(a, "mirror_url"))
-
-    cfg.target_disk = current_disk()
-    cfg.partition_mode = mode_ids()[sync::atomic_load("mode_idx")]
-    cfg.filesystem = root_fs_options()[sync::atomic_load("fs_idx")]
-    cfg.enable_swap = flag("swap_on")
-    cfg.swap_size_mb = util::to_int_or(v(a, "swap_mb"), 0)
-    cfg.luks = flag("luks_on")
-    cfg.luks_password = v(a, "luks_pw")
-    cfg.luks_confirm = v(a, "luks_pw2")
-
-    if cfg.partition_mode == "manual" is
-        let parts: [model::PartInfo] = current_parts(a)
-        let mut specs: [model::PartSpec] = []
+    let mut specs: [model::PartSpec] = []
+    let parts_raw: string = data::get_raw(c, "manual_parts")
+    if parts_raw != "" is
+        let items: [string] = data::items(parts_raw)
         let mut i: int = 0
-        while i < parts.len() is
-            let mp: string = str::trim(v(a, "mp_" + to_string(i)))
+        while i < items.len() is
+            let mp: string = str::trim(data::get_str(items[i], "mountpoint"))
             if mp != "" is
                 specs.push(model::PartSpec {
-                    device: parts[i].device,
+                    device: data::get_str(items[i], "device"),
                     mountpoint: mp,
-                    fs: fs_options()[sync::atomic_load("pfs" + to_string(i))],
-                    format: flag("pf" + to_string(i))
+                    fs: data::get_str(items[i], "fs"),
+                    format: data::get_bool(items[i], "format")
                 })
             end
             i += 1
         end
-        cfg.manual_parts = specs
     end
-
-    let ps: [model::Profile] = profiles::all()
-    let p_idx: int = sync::atomic_load("profile_idx")
-    cfg.profile = if p_idx >= 0 && p_idx < ps.len() then ps[p_idx].id else "minimal"
-    cfg.install_hsharp = flag("hsharp_on")
-    cfg.install_bit = flag("bit_on")
-
-    let hostname_in: string = str::trim(v(a, "hostname"))
-    cfg.hostname = if hostname_in == "" then "hackeros" else hostname_in
-    cfg.user.username  = str::trim(v(a, "username"))
-    cfg.user.full_name = v(a, "fullname")
-    cfg.user.password  = v(a, "password")
-    cfg.user.is_admin  = flag("admin_on")
-    cfg.password_confirm = v(a, "password2")
-    cfg.root_password  = v(a, "rootpw")
-    cfg.root_confirm   = v(a, "rootpw2")
-
-    cfg.uefi = flag("uefi")
-    cfg.accepted_summary = flag("accepted")
-    cfg.resume_available = flag("resume_available")
-    cfg.resume = flag("resume_on")
+    cfg.manual_parts = specs
     return cfg
 end
 
-;; Odwrotnie: wczytany config → atomiki i stan formularza (wznawianie).
-fn index_of_str(items: [string], x: string) -> int is
+;; Konfiguracja → JSON (bez haseł) — do wczytania zapisanej konfiguracji.
+fn cfg_obj(cfg: model::InstallConfig) -> string is
+    let mut o: string = data::object()
+    o = data::set_str(o, "locale", cfg.locale)
+    o = data::set_str(o, "keyboard", cfg.keyboard)
+    o = data::set_str(o, "timezone", cfg.timezone)
+    o = data::set_str(o, "mirror_id", cfg.mirror_id)
+    o = data::set_str(o, "mirror_url", cfg.mirror_url)
+    o = data::set_str(o, "target_disk", cfg.target_disk)
+    o = data::set_str(o, "partition_mode", cfg.partition_mode)
+    o = data::set_str(o, "filesystem", cfg.filesystem)
+    o = data::set_bool(o, "enable_swap", cfg.enable_swap)
+    o = data::set_int(o, "swap_size_mb", cfg.swap_size_mb)
+    o = data::set_bool(o, "luks", cfg.luks)
+    o = data::set_str(o, "profile", cfg.profile)
+    o = data::set_bool(o, "install_hsharp", cfg.install_hsharp)
+    o = data::set_bool(o, "install_bit", cfg.install_bit)
+    o = data::set_str(o, "hostname", cfg.hostname)
+    o = data::set_str(o, "username", cfg.user.username)
+    o = data::set_str(o, "full_name", cfg.user.full_name)
+    o = data::set_bool(o, "is_admin", cfg.user.is_admin)
+    let mut parts: [string] = []
     let mut i: int = 0
-    while i < items.len() is
-        if items[i] == x is return i end
+    while i < cfg.manual_parts.len() is
+        let p: model::PartSpec = cfg.manual_parts[i]
+        let mut po: string = data::set_str(data::object(), "device", p.device)
+        po = data::set_str(po, "mountpoint", p.mountpoint)
+        po = data::set_str(po, "fs", p.fs)
+        po = data::set_bool(po, "format", p.format)
+        parts.push(po)
         i += 1
     end
-    return -1
+    return data::set_raw(o, "manual_parts", arr(parts))
 end
 
-fn apply_cfg(app_in: app::App, c: model::InstallConfig) -> app::App is
-    let mut a: app::App = app_in
-    let li: int = index_of_str(locales::locale_codes(), c.locale)
-    if li >= 0 is sync::atomic_store("locale_idx", li) end
-    let ki: int = index_of_str(locales::keyboard_codes(), c.keyboard)
-    if ki >= 0 is sync::atomic_store("keyboard_idx", ki) end
-    let ti: int = index_of_str(locales::timezone_codes(), c.timezone)
-    if ti >= 0 is sync::atomic_store("timezone_idx", ti) end
+;; ── obiekty list ─────────────────────────────────────────────────────
 
-    let mi: int = index_of_str(network::mirror_ids(), c.mirror_id)
-    if mi >= 0 is sync::atomic_store("mirror_idx", mi) end
-    a = set_v(a, "mirror_url", c.mirror_url)
-
-    let disks: [model::Disk] = disks_now()
-    let mut di: int = -1
-    let mut k: int = 0
-    while k < disks.len() is
-        if disks[k].device == c.target_disk is di = k end
-        k += 1
-    end
-    sync::atomic_store("disk_idx", di)
-    let mdi: int = index_of_str(mode_ids(), c.partition_mode)
-    if mdi >= 0 is sync::atomic_store("mode_idx", mdi) end
-    let fi: int = index_of_str(root_fs_options(), c.filesystem)
-    if fi >= 0 is sync::atomic_store("fs_idx", fi) end
-    sync::atomic_store("swap_on", util::b2i(c.enable_swap))
-    a = set_v(a, "swap_mb", to_string(c.swap_size_mb))
-    sync::atomic_store("luks_on", util::b2i(c.luks))
-
-    let pi: int = index_of_str(profiles::ids(), c.profile)
-    if pi >= 0 is sync::atomic_store("profile_idx", pi) end
-    sync::atomic_store("hsharp_on", util::b2i(c.install_hsharp))
-    sync::atomic_store("bit_on", util::b2i(c.install_bit))
-
-    a = set_v(a, "hostname", c.hostname)
-    a = set_v(a, "username", c.user.username)
-    a = set_v(a, "fullname", c.user.full_name)
-    sync::atomic_store("admin_on", util::b2i(c.user.is_admin))
-
-    ;; przypisania partycji: dopasowanie po nazwie urządzenia
-    if c.partition_mode == "manual" is
-        let parts: [model::PartInfo] = current_parts(a)
-        let mut i: int = 0
-        while i < parts.len() is
-            let mut j: int = 0
-            while j < c.manual_parts.len() is
-                if c.manual_parts[j].device == parts[i].device is
-                    a = set_v(a, "mp_" + to_string(i), c.manual_parts[j].mountpoint)
-                    sync::atomic_store("pf" + to_string(i), util::b2i(c.manual_parts[j].format))
-                    let fidx: int = index_of_str(fs_options(), c.manual_parts[j].fs)
-                    if fidx >= 0 is sync::atomic_store("pfs" + to_string(i), fidx) end
-                end
-                j += 1
-            end
-            i += 1
-        end
-    end
-    return a
+fn disk_obj(d: model::Disk) -> string is
+    let mut o: string = data::set_str(data::object(), "device", d.device)
+    o = data::set_str(o, "model", d.model)
+    o = data::set_int(o, "size_gb", d.size_gb)
+    o = data::set_bool(o, "removable", d.removable)
+    return data::set_str(o, "label", model::disk_label(d))
 end
 
-;; ── akcje (odbierane z kolejki `act`) ────────────────────────────────
-
-fn cycle_index(name: string, count: int, delta: int) is
-    let cur: int = sync::atomic_load(name)
-    sync::atomic_store(name, ((cur + delta) % count + count) % count)
+fn part_obj(p: model::PartInfo) -> string is
+    let mut o: string = data::set_str(data::object(), "device", p.device)
+    o = data::set_int(o, "size_mb", p.size_mb)
+    o = data::set_str(o, "fstype", p.fstype)
+    o = data::set_str(o, "label", p.label)
+    o = data::set_bool(o, "is_esp", p.is_esp)
+    return data::set_str(o, "text", model::part_label(p))
 end
 
-fn rescan_os(app_in: app::App) -> app::App is
-    return app::set_state(app_in, "os_raw", system_scan::probe_other_os_raw())
+fn os_obj(x: model::OtherOs) -> string is
+    let mut o: string = data::set_str(data::object(), "device", x.device)
+    o = data::set_str(o, "name", x.name)
+    o = data::set_str(o, "kind", x.kind)
+    return data::set_str(o, "text", model::other_os_label(x))
 end
 
-fn refresh_net(app_in: app::App) -> app::App is
-    sync::atomic_store("online", util::b2i(network::is_online()))
-    return app_in
+fn wifi_obj(n: model::WifiNet) -> string is
+    let mut o: string = data::set_str(data::object(), "ssid", n.ssid)
+    o = data::set_int(o, "signal", n.signal)
+    o = data::set_str(o, "security", n.security)
+    o = data::set_bool(o, "in_use", n.in_use)
+    return data::set_str(o, "label", model::wifi_label(n))
 end
 
-fn process_action(app_in: app::App, step: model::Step) -> app::App is
-    let mut a: app::App = app_in
-    let code: int = sync::atomic_load("act")
-    if code == 0 is return a end
-    let arg: int = sync::atomic_load("act_arg")
-    sync::atomic_store("act", 0)
-    mark_dirty()
-
-    if code == 1 is
-        if step == model::Step::Language is cycle_index("locale_idx", locale_count(), arg) end
-        if step == model::Step::Keyboard is cycle_index("keyboard_idx", keyboard_count(), arg) end
-        if step == model::Step::Timezone is cycle_index("timezone_idx", timezone_count(), arg) end
-    elsif code == 2 is
-        sync::atomic_store("disk_idx", arg)
-    elsif code == 3 is
-        sync::atomic_store("mode_idx", arg)
-        if arg == 2 is sync::atomic_store("parts_inited", 0) end
-    elsif code == 4 is
-        sync::atomic_store("fs_idx", arg)
-    elsif code == 5 is
-        let nm: string = tg_name(arg)
-        sync::atomic_store(nm, 1 - sync::atomic_load(nm))
-    elsif code == 6 is
-        let nets: [model::WifiNet] = network::scan_wifi(false)
-        if arg >= 0 && arg < nets.len() is
-            a = app::set_state(a, "wifi_ssid", nets[arg].ssid)
-            a = app::set_state(a, "wifi_open", if nets[arg].security == "" then "1" else "0")
-        end
-    elsif code == 7 is
-        network::scan_wifi(true)
-        a = app::set_state(a, "wifi_msg", "Skan zakończony.")
-    elsif code == 8 is
-        let ssid: string = app::state(a, "wifi_ssid")
-        if ssid == "" is
-            a = app::set_state(a, "wifi_msg", "Najpierw wybierz sieć z listy.")
-        else is
-            network::connect_start(ssid, v(a, "wifi_pw"))
-            sync::atomic_store("connecting", 1)
-            a = app::set_state(a, "wifi_msg", "Łączenie z " + ssid + "…")
-        end
-    elsif code == 9 is
-        a = refresh_net(a)
-    elsif code == 10 is
-        sync::atomic_store("mirror_idx", arg)
-    elsif code == 11 is
-        sync::atomic_store("profile_idx", arg)
-    elsif code == 12 is
-        a = rescan_os(a)
-    elsif code == 13 is
-        cycle_index("pfs" + to_string(arg), fs_options().len(), 1)
-    elsif code == 14 is
-        let nm: string = "pf" + to_string(arg)
-        sync::atomic_store(nm, 1 - sync::atomic_load(nm))
-    elsif code == 15 is
-        if util::has_cmd("gparted") is process::spawn("gparted") end
-    elsif code == 16 is
-        let base: model::InstallConfig = build_cfg(a)
-        a = apply_cfg(a, config_io::load_resume(base))
-        sync::atomic_store("step", steps::step_index(model::Step::Account))
-        sync::atomic_store("enter_pending", 1)
-        a = app::set_state(a, "error_msg", "Wczytano zapisaną konfigurację. Wpisz ponownie hasła — nie są nigdzie zapisywane.")
-    elsif code == 17 is
-        a = begin_install(a, true)
-    end
-    return a
+fn profile_obj(p: model::Profile) -> string is
+    let mut o: string = data::set_str(data::object(), "id", p.id)
+    o = data::set_str(o, "label", p.label)
+    o = data::set_str(o, "description", p.description)
+    o = data::set_raw(o, "packages", data::str_array(p.packages))
+    return data::set_bool(o, "needs_network", profiles::needs_network(p))
 end
 
-;; ── wejście do kroku (jednorazowe skanowanie) ────────────────────────
-
-fn on_enter(app_in: app::App, step: model::Step) -> app::App is
-    let mut a: app::App = app_in
-    match step is
-        model::Step::Network => is
-            a = refresh_net(a)
-            a = app::set_state(a, "wifi_msg", "")
-            if network::wifi_available() is network::scan_wifi(true) end
-        end
-        model::Step::Disk => is
-            if app::state(a, "os_raw") == "" && app::state(a, "os_done") != "1" is
-                a = rescan_os(a)
-                a = app::set_state(a, "os_done", "1")
-            end
-        end
-        model::Step::Partitions => is
-            ;; domyślne systemy plików wg tego, co już jest na partycjach
-            if sync::atomic_load("parts_inited") == 0 is
-                let parts: [model::PartInfo] = current_parts(a)
-                let mut i: int = 0
-                while i < parts.len() is
-                    let idx: int = if parts[i].is_esp then 3 elsif parts[i].fstype == "swap" then 4 else 0
-                    sync::atomic_store("pfs" + to_string(i), idx)
-                    sync::atomic_store("pf" + to_string(i), 0)
-                    i += 1
-                end
-                sync::atomic_store("parts_inited", 1)
-            end
-        end
-        model::Step::Summary => is
-            ;; czy da się wznowić poprzednią próbę dla DOKŁADNIE tej konfiguracji?
-            let cfg: model::InstallConfig = build_cfg(a)
-            let st: string = installer_run::probe(cfg)
-            sync::atomic_store("resume_available", util::b2i(st == "resume"))
-            sync::atomic_store("resume_on", util::b2i(st == "resume"))
-            sync::atomic_store("accepted", 0)
-            sync::atomic_store("show_plan", 0)
-            if st == "running" is
-                a = app::set_state(a, "error_msg", "Instalacja już trwa w tle — dołączam do niej.")
-                sync::atomic_store("step", steps::step_index(model::Step::Installing))
-            end
-        end
-        _ => a = a
-    end
-    return a
-end
-
-;; ── instalacja w tle ─────────────────────────────────────────────────
-
-fn begin_install(app_in: app::App, resume: bool) -> app::App is
-    let mut a: app::App = app_in
-    let cfg: model::InstallConfig = build_cfg(a)
-    config_io::save_resume(cfg)
-    let err: string = installer_run::start(cfg, resume)
-    if err != "" is
-        a = app::set_state(a, "error_msg", err)
-        return a
-    end
-    sync::atomic_store("idle_ticks", 0)
-    sync::atomic_store("step", steps::step_index(model::Step::Installing))
-    a = app::set_state(a, "error_msg", "")
-    mark_dirty()
-    return a
-end
-
-fn poll_install(app_in: app::App) -> app::App is
-    let mut a: app::App = app_in
-    let p: model::Progress = installer_run::poll()
-    let sig: string = p.state + "|" + to_string(p.step) + "|" + p.label
-    if sig != app::state(a, "install_sig") is
-        a = app::set_state(a, "install_sig", sig)
-        mark_dirty()
-    end
-
-    if p.state == "idle" is
-        sync::atomic_store("idle_ticks", sync::atomic_load("idle_ticks") + 1)
-        if sync::atomic_load("idle_ticks") > 150 is
-            a = app::set_state(a, "error_msg", "Wykonawca instalacji nie wystartował (brak pliku statusu). Sprawdź /var/log/hackeros-installer.log.")
-            sync::atomic_store("step", steps::step_index(model::Step::Done))
-            sync::atomic_store("install_ok", 0)
-            mark_dirty()
-        end
-    end
-
-    if p.state == "ok" || p.state == "failed" is
-        sync::atomic_store("install_ok", util::b2i(p.state == "ok"))
-        if p.state == "ok" is config_io::clear_resume_config() end
-        sync::atomic_store("step", steps::step_index(model::Step::Done))
-        mark_dirty()
-    end
-    return a
-end
-
-;; ── on_tick ──────────────────────────────────────────────────────────
-
-fn tick(app_in: app::App) -> app::App is
-    let mut a: app::App = app_in
-    let mut error_msg: string = app::state(a, "error_msg")
-    let start_step: int = sync::atomic_load("step")
-    let cur: model::Step = steps::step_from_index(start_step)
-
-    a = capture_inputs(a, cur)
-    a = process_action(a, cur)
-
-    ;; stan połączenia Wi-Fi (w tle)
-    if sync::atomic_load("connecting") == 1 is
-        let r: string = network::connect_poll()
-        if r != "" is
-            sync::atomic_store("connecting", 0)
-            network::connect_clear()
-            a = refresh_net(a)
-            a = app::set_state(a, "wifi_msg", if r == "ok" then "Połączono." else r)
-            mark_dirty()
-        end
-    end
-
-    if cur == model::Step::Installing is
-        a = poll_install(a)
-    end
-
-    if sync::atomic_load("want_prev") == 1 is
-        sync::atomic_store("want_prev", 0)
-        let c0: model::InstallConfig = build_cfg(a)
-        if steps::can_go_back(c0.step) is
-            sync::atomic_store("step", steps::step_index(steps::prev_for(c0)))
-            error_msg = ""
-            sync::atomic_store("enter_pending", 1)
-            mark_dirty()
-        end
-    end
-
-    if sync::atomic_load("want_next") == 1 is
-        sync::atomic_store("want_next", 0)
-        let cfg: model::InstallConfig = build_cfg(a)
-        let mut v_res: validate::ValidationResult = validate::validate_step(cfg)
-        if v_res.ok && cfg.step == model::Step::Disk is
-            let free: model::FreeSpace = system_scan::detect_free_space(cfg.target_disk)
-            let ae: string = validate::alongside_error(cfg, free.size_mb)
-            if ae != "" is v_res = validate::ValidationResult { ok: false, message: ae } end
-        end
-        if !v_res.ok is
-            error_msg = v_res.message
-        else is
-            error_msg = ""
-            if cfg.step == model::Step::Summary is
-                a = begin_install(a, cfg.resume)
-                error_msg = app::state(a, "error_msg")
-            else is
-                sync::atomic_store("step", steps::step_index(steps::next_for(cfg)))
-                sync::atomic_store("enter_pending", 1)
-            end
-        end
-        mark_dirty()
-    end
-
-    ;; wejście do nowego kroku — skanowanie sprzętu/sieci raz, nie co tick
-    if sync::atomic_load("enter_pending") == 1 is
-        sync::atomic_store("enter_pending", 0)
-        a = on_enter(a, steps::step_from_index(sync::atomic_load("step")))
-        mark_dirty()
-    end
-
-    if error_msg != app::state(a, "error_msg") is
-        mark_dirty()
-    end
-    a = app::set_state(a, "error_msg", error_msg)
-
-    if sync::atomic_load("dirty") == 1 is
-        sync::atomic_store("dirty", 0)
-        let cur_cfg: model::InstallConfig = build_cfg(a)
-        a = app::load_html_str(a, render(a, cur_cfg, error_msg))
-    end
-    return a
-end
-
-;; ── render ───────────────────────────────────────────────────────────
-
-fn step_dots(current: model::Step) -> string is
-    let cur_i: int = steps::step_index(current)
-    let mut out: string = "<div class=\"steps\">"
+fn steps_meta() -> string is
+    let mut items: [string] = []
     let mut i: int = 0
     while i < steps::step_count() is
-        let cls: string = if i == cur_i then "step-dot active" elsif i < cur_i then "step-dot done" else "step-dot"
-        out = out + "<div class=\"" + cls + "\"></div>"
+        let s: model::Step = steps::step_from_index(i)
+        let mut o: string = data::set_int(data::object(), "index", i)
+        o = data::set_str(o, "title", steps::step_title(s))
+        o = data::set_str(o, "subtitle", steps::step_subtitle(s))
+        o = data::set_bool(o, "can_back", steps::can_go_back(s))
+        o = data::set_bool(o, "can_next", steps::can_go_next(s))
+        items.push(o)
         i += 1
     end
-    out = out + "</div>"
-    return out
+    return arr(items)
 end
 
-fn nav_row(cfg: model::InstallConfig, next_label: string) -> string is
-    let mut out: string = "<div class=\"row\">"
-    if steps::can_go_back(cfg.step) is
-        out = out + "<div class=\"btn ghost\" on-click=\"go_prev\"><span>Wstecz</span></div>"
-    end
-    if steps::can_go_next(cfg.step) is
-        out = out + "<div class=\"btn primary\" on-click=\"go_next\"><span>" + next_label + "</span></div>"
-    end
-    out = out + "</div>"
-    return out
+;; ── komendy: start ───────────────────────────────────────────────────
+
+fn cmd_bootstrap(args: string) -> string is
+    let mut o: string = data::object()
+    o = data::set_str(o, "core_version", "0.2.0")
+    o = data::set_bool(o, "uefi", system_scan::detect_uefi())
+    o = data::set_str(o, "default_hostname", system_scan::default_hostname())
+    o = data::set_int(o, "ram_mb", system_scan::ram_total_mb())
+    o = data::set_int(o, "cpus", system_scan::cpu_count())
+    o = data::set_bool(o, "has_resume", config_io::has_resume_config())
+    o = data::set_raw(o, "steps", steps_meta())
+    o = data::set_raw(o, "locales", lbl(locales::locale_codes(), locales::locale_labels()))
+    o = data::set_raw(o, "keyboards", lbl(locales::keyboard_codes(), locales::keyboard_labels()))
+    o = data::set_raw(o, "timezones", lbl(locales::timezone_codes(), locales::timezone_labels()))
+    o = data::set_bool(o, "gparted", util::has_cmd("gparted"))
+    o = data::set_int(o, "alongside_min_mb", validate::alongside_min_mb())
+    o = data::set_str(o, "hsharp_version", plan::hsharp_version())
+    o = data::set_str(o, "bit_version", plan::bit_version())
+    return o
 end
 
-fn cycler_block(label: string, index: int, total: int) -> string is
-    return
-        "<div class=\"row\">" +
-            "<div class=\"btn ghost\" on-click=\"cycle_prev\"><span>&lt;</span></div>" +
-            "<div class=\"option selected\"><span>" + html_escape(label) + "</span></div>" +
-            "<div class=\"btn ghost\" on-click=\"cycle_next\"><span>&gt;</span></div>" +
-        "</div>" +
-        "<p class=\"muted\">" + to_string(index + 1) + " / " + to_string(total) + "</p>"
-end
+;; ── komendy: sieć ────────────────────────────────────────────────────
 
-;; Pozycja listy wyboru; id = "<prefix>_<n>", handler odczytuje n.
-fn pick_item(handler: string, prefix: string, n: int, selected: bool, label: string) -> string is
-    let cls: string = if selected then "option selected" else "option"
-    return "<div class=\"" + cls + "\" id=\"" + prefix + "_" + to_string(n) + "\" on-click=\"" + handler + "\"><span>" +
-        html_escape(label) + "</span></div>"
-end
-
-fn toggle_div(n: int, on: bool, label: string) -> string is
-    let cls: string = if on then "toggle on" else "toggle"
-    return "<div class=\"" + cls + "\" id=\"tg_" + to_string(n) + "\" on-click=\"h_toggle\"><span>" +
-        html_escape(label) + "</span></div>"
-end
-
-fn button(handler: string, label: string) -> string is
-    return "<div class=\"btn ghost\" on-click=\"" + handler + "\"><span>" + html_escape(label) + "</span></div>"
-end
-
-fn field(a: app::App, label: string, id: string, kind: string, placeholder: string) -> string is
-    let t: string = if kind == "password" then " type=\"password\"" else ""
-    return "<p>" + html_escape(label) + "</p><input id=\"" + id + "\"" + t + " placeholder=\"" + html_escape(placeholder) +
-        "\" value=\"" + html_escape(v(a, id)) + "\" />"
-end
-
-fn render_welcome(a: app::App) -> string is
-    let mut out: string =
-        "<h1>Witaj w instalatorze HackerOS</h1>" +
-        "<p>Ten kreator przeprowadzi Cię przez instalację HackerOS (Standard Edition) na tym komputerze.</p>" +
-        "<p class=\"muted\">Rdzeń instalatora " + core_version_line() + "</p>"
-    if config_io::has_resume_config() is
-        out = out + "<div class=\"col\"><p class=\"error\">Znaleziono konfigurację przerwanej instalacji.</p>" +
-            "<div class=\"btn primary\" on-click=\"h_load_resume\"><span>Wznów przerwaną instalację</span></div></div>"
-    end
-    return out
-end
-
-fn core_version_line() -> string is
-    return "hackeros-installer-core"
-end
-
-fn render_language(idx: int) -> string is
-    return "<h2>Wybierz język</h2>" + cycler_block(locales::locale_labels()[idx], idx, locale_count())
-end
-
-fn render_keyboard(idx: int) -> string is
-    return "<h2>Wybierz układ klawiatury</h2>" + cycler_block(locales::keyboard_labels()[idx], idx, keyboard_count())
-end
-
-fn render_timezone(idx: int) -> string is
-    return "<h2>Wybierz strefę czasową</h2>" + cycler_block(locales::timezone_labels()[idx], idx, timezone_count())
-end
-
-fn render_network(a: app::App, cfg: model::InstallConfig) -> string is
-    let mut out: string = "<h2>Połączenie z siecią</h2>"
-    if cfg.online is
-        out = out + "<p class=\"ok\">Połączono z Internetem.</p>"
-    else is
-        out = out + "<p class=\"error\">Brak połączenia z Internetem. Możesz kontynuować offline (profil Minimalny) albo połączyć się poniżej.</p>"
-    end
-    out = out + "<div class=\"row\">" + button("h_net_check", "Sprawdź ponownie") + "</div>"
-
-    if network::wifi_available() is
-        out = out + "<h2>Sieci Wi-Fi</h2>"
-        let nets: [model::WifiNet] = network::scan_wifi(false)
-        let chosen: string = app::state(a, "wifi_ssid")
-        let mut i: int = 0
-        out = out + "<div class=\"col\">"
-        while i < nets.len() && i < 8 is
-            out = out + pick_item("h_pick_wifi", "wifi", i, nets[i].ssid == chosen, model::wifi_label(nets[i]))
-            i += 1
-        end
-        out = out + "</div>"
-        if nets.len() == 0 is out = out + "<p class=\"muted\">Nie znaleziono sieci. Kliknij „Skanuj ponownie”.</p>" end
-        if chosen != "" && app::state(a, "wifi_open") != "1" is
-            out = out + field(a, "Hasło do sieci " + chosen, "wifi_pw", "password", "")
-        end
-        out = out + "<div class=\"row\">" + button("h_wifi_scan", "Skanuj ponownie") +
-            "<div class=\"btn primary\" on-click=\"h_wifi_connect\"><span>Połącz</span></div></div>"
-        let msg: string = app::state(a, "wifi_msg")
-        if msg != "" is out = out + "<p class=\"muted\">" + html_escape(msg) + "</p>" end
-    else is
-        out = out + "<p class=\"muted\">Nie wykryto karty Wi-Fi albo brak NetworkManagera — użyj kabla sieciowego.</p>"
-    end
-
-    out = out + "<h2>Serwer pakietów</h2><div class=\"col\">"
+fn cmd_network_status(args: string) -> string is
+    let mut o: string = data::object()
+    o = data::set_bool(o, "online", network::is_online())
+    o = data::set_bool(o, "wifi_available", network::wifi_available())
     let ms: [model::Mirror] = network::mirrors()
-    let sel: int = sync::atomic_load("mirror_idx")
-    let mut k: int = 0
-    while k < ms.len() is
-        out = out + pick_item("h_pick_mirror", "mirror", k, k == sel, ms[k].label)
-        k += 1
+    let mut items: [string] = []
+    let mut i: int = 0
+    while i < ms.len() is
+        let mut m: string = data::set_str(data::object(), "id", ms[i].id)
+        m = data::set_str(m, "label", ms[i].label)
+        items.push(data::set_str(m, "url", ms[i].url))
+        i += 1
     end
-    out = out + "</div>"
-    if cfg.mirror_id == "custom" is
-        out = out + field(a, "Adres serwera (np. https://mirror.example.org/archlinux)", "mirror_url", "text", "https://")
-    end
-    return out
+    return data::set_raw(o, "mirrors", arr(items))
 end
 
-fn render_disk(a: app::App, cfg: model::InstallConfig) -> string is
-    let disks: [model::Disk] = disks_now()
-    if disks.len() == 0 is
-        return "<h2>Dysk instalacyjny</h2>" +
-            "<p class=\"error\">Nie wykryto żadnego dysku. Podłącz nośnik i uruchom instalator ponownie.</p>"
+fn cmd_wifi_scan(args: string) -> string is
+    let nets: [model::WifiNet] = network::scan_wifi(data::get_bool(args, "rescan"))
+    let mut items: [string] = []
+    let mut i: int = 0
+    while i < nets.len() && i < 20 is
+        items.push(wifi_obj(nets[i]))
+        i += 1
     end
-    let sel: int = sync::atomic_load("disk_idx")
-    let mut out: string = "<h2>Wybierz dysk instalacyjny</h2><div class=\"col\">"
+    return data::set_raw(data::object(), "networks", arr(items))
+end
+
+fn cmd_wifi_connect(args: string) -> string is
+    let ssid: string = data::get_str(args, "ssid")
+    if ssid == "" is return err_obj("Najpierw wybierz sieć z listy.") end
+    network::connect_start(ssid, data::get_str(args, "password"))
+    return ok_obj()
+end
+
+;; done=false dopóki trwa łączenie; potem ok + komunikat.
+fn cmd_wifi_poll(args: string) -> string is
+    let r: string = network::connect_poll()
+    let mut o: string = data::object()
+    if r == "" is return data::set_bool(o, "done", false) end
+    network::connect_clear()
+    o = data::set_bool(o, "done", true)
+    o = data::set_bool(o, "ok", r == "ok")
+    o = data::set_str(o, "message", if r == "ok" then "Połączono." else r)
+    return data::set_bool(o, "online", network::is_online())
+end
+
+;; ── komendy: dysk ────────────────────────────────────────────────────
+
+fn cmd_list_disks(args: string) -> string is
+    let disks: [model::Disk] = system_scan::detect_disks()
+    let mut items: [string] = []
     let mut i: int = 0
     while i < disks.len() is
-        out = out + pick_item("h_pick_disk", "disk", i, i == sel, model::disk_label(disks[i]))
+        items.push(disk_obj(disks[i]))
         i += 1
     end
-    out = out + "</div>"
-
-    if sel < 0 || sel >= disks.len() is
-        return out + "<p class=\"muted\">Wybierz dysk, aby zobaczyć opcje partycjonowania.</p>"
-    end
-    if disks[sel].removable is
-        out = out + "<p class=\"error\">To urządzenie jest oznaczone jako wymienne (USB?) — upewnij się, że to właściwy dysk.</p>"
-    end
-
-    ;; wykryte inne systemy na tym dysku
-    let others: [model::OtherOs] = system_scan::other_os_on_disk(system_scan::parse_other_os(app::state(a, "os_raw")), cfg.target_disk)
-    if others.len() > 0 is
-        out = out + "<h2>Wykryte systemy na tym dysku</h2><div class=\"col\">"
-        let mut o: int = 0
-        while o < others.len() is
-            out = out + "<p>• " + html_escape(model::other_os_label(others[o])) + "</p>"
-            o += 1
-        end
-        out = out + "</div>"
-    elsif system_scan::os_prober_available() is
-        out = out + "<p class=\"muted\">os-prober nie wykrył innych systemów na tym dysku.</p>"
-    else is
-        out = out + "<p class=\"muted\">Brak os-prober — nie można wykryć innych systemów.</p>"
-    end
-    out = out + "<div class=\"row\">" + button("h_os_rescan", "Skanuj systemy ponownie") + "</div>"
-
-    out = out + "<h2>Sposób partycjonowania</h2><div class=\"col\">"
-    let m_sel: int = sync::atomic_load("mode_idx")
-    let mut m: int = 0
-    while m < 3 is
-        out = out + pick_item("h_mode", "mode", m, m == m_sel, mode_labels()[m])
-        m += 1
-    end
-    out = out + "</div>"
-
-    if m_sel == 0 is
-        out = out + "<p class=\"error\">Cała zawartość dysku " + html_escape(cfg.target_disk) + " zostanie trwale usunięta.</p>"
-    elsif m_sel == 1 is
-        let free: model::FreeSpace = system_scan::detect_free_space(cfg.target_disk)
-        out = out + "<p>Instalator użyje największego wolnego obszaru: <b>" + to_string(free.size_mb) + " MiB</b> " +
-            "(wymagane " + to_string(validate::alongside_min_mb()) + " MiB). Istniejące partycje nie są ruszane.</p>"
-        if free.size_mb < validate::alongside_min_mb() is
-            out = out + "<p class=\"error\">Za mało wolnego miejsca — zmniejsz partycję innego systemu (np. w GParted).</p>"
-        end
-        if util::has_cmd("gparted") is out = out + "<div class=\"row\">" + button("h_gparted", "Otwórz GParted") + "</div>" end
-    else is
-        out = out + "<p class=\"muted\">Na następnym ekranie przypiszesz punkty montowania do istniejących partycji.</p>"
-        if util::has_cmd("gparted") is out = out + "<div class=\"row\">" + button("h_gparted", "Otwórz GParted (utwórz partycje)") + "</div>" end
-    end
-
-    if m_sel != 2 is
-        out = out + "<h2>System plików</h2><div class=\"row\">"
-        let f_sel: int = sync::atomic_load("fs_idx")
-        let mut f: int = 0
-        while f < 3 is
-            out = out + pick_item("h_fs", "fs", f, f == f_sel, root_fs_options()[f])
-            f += 1
-        end
-        out = out + "</div>"
-        out = out + toggle_div(tg_swap(), flag("swap_on"), "Plik wymiany (swap)")
-        if flag("swap_on") is
-            out = out + field(a, "Rozmiar pliku wymiany (MiB)", "swap_mb", "text", "2048")
-        end
-    end
-
-    out = out + toggle_div(tg_luks(), flag("luks_on"), "Zaszyfruj dysk (LUKS2)")
-    if flag("luks_on") is
-        out = out + field(a, "Hasło szyfrowania (min. 8 znaków)", "luks_pw", "password", "") +
-            field(a, "Powtórz hasło szyfrowania", "luks_pw2", "password", "") +
-            "<p class=\"muted\">Zostanie utworzona niezaszyfrowana partycja /boot (1 GiB). Hasło będzie wymagane przy każdym starcie.</p>"
-    end
-    return out
+    return data::set_raw(data::object(), "disks", arr(items))
 end
 
-fn render_partitions(a: app::App, cfg: model::InstallConfig) -> string is
-    let parts: [model::PartInfo] = current_parts(a)
-    let mut out: string = "<h2>Przypisz partycje</h2>" +
-        "<p class=\"muted\">Wpisz punkt montowania (/, /home, /boot, /boot/efi, swap). Puste pole = partycja nie jest używana. " +
-        "Partycja / musi być sformatowana" + (if cfg.uefi then "; w trybie UEFI potrzebna jest też /boot/efi (vfat)." else ".") + "</p>"
-    if parts.len() == 0 is
-        out = out + "<p class=\"error\">Na dysku nie ma partycji. Utwórz je (np. w GParted) i wróć do tego kroku.</p>"
-        if util::has_cmd("gparted") is out = out + "<div class=\"row\">" + button("h_gparted", "Otwórz GParted") + "</div>" end
-        return out
-    end
+fn cmd_disk_info(args: string) -> string is
+    let disk: string = data::get_str(args, "disk")
+    let free: model::FreeSpace = system_scan::detect_free_space(disk)
+    let parts: [model::PartInfo] = system_scan::detect_partitions(disk)
+    let mut items: [string] = []
     let mut i: int = 0
     while i < parts.len() is
-        let n: string = to_string(i)
-        out = out + "<div class=\"part\"><p>" + html_escape(model::part_label(parts[i])) + "</p>" +
-            "<div class=\"row\">" +
-            "<input id=\"mp_" + n + "\" placeholder=\"punkt montowania\" value=\"" + html_escape(v(a, "mp_" + n)) + "\" />" +
-            "<div class=\"btn ghost\" id=\"pfs_" + n + "\" on-click=\"h_pfs\"><span>" + fs_options()[sync::atomic_load("pfs" + n)] + "</span></div>" +
-            toggle_pfmt(i) +
-            "</div></div>"
+        items.push(part_obj(parts[i]))
         i += 1
     end
-    return out
+    let mut o: string = data::set_int(data::object(), "free_mb", free.size_mb)
+    o = data::set_int(o, "free_start_mb", free.start_mb)
+    o = data::set_int(o, "free_end_mb", free.end_mb)
+    o = data::set_str(o, "table", system_scan::disk_table(disk))
+    o = data::set_str(o, "esp", system_scan::find_esp(disk))
+    return data::set_raw(o, "partitions", arr(items))
 end
 
-fn toggle_pfmt(i: int) -> string is
-    let on: bool = flag("pf" + to_string(i))
-    let cls: string = if on then "toggle on" else "toggle"
-    return "<div class=\"" + cls + "\" id=\"pfmt_" + to_string(i) + "\" on-click=\"h_pfmt\"><span>" +
-        (if on then "formatuj" else "zachowaj dane") + "</span></div>"
+;; os-prober bywa wolny — osobna komenda, wołana raz przy wejściu w krok.
+fn cmd_probe_os(args: string) -> string is
+    let disk: string = data::get_str(args, "disk")
+    let all: [model::OtherOs] = system_scan::parse_other_os(system_scan::probe_other_os_raw())
+    let here: [model::OtherOs] = system_scan::other_os_on_disk(all, disk)
+    let mut items: [string] = []
+    let mut i: int = 0
+    while i < here.len() is
+        items.push(os_obj(here[i]))
+        i += 1
+    end
+    let mut o: string = data::set_bool(data::object(), "prober", system_scan::os_prober_available())
+    return data::set_raw(o, "systems", arr(items))
 end
 
-fn render_profile(a: app::App, cfg: model::InstallConfig) -> string is
+fn cmd_open_gparted(args: string) -> string is
+    if util::has_cmd("gparted") is process::spawn("gparted") end
+    return ok_obj()
+end
+
+;; ── komendy: profile ─────────────────────────────────────────────────
+
+fn cmd_list_profiles(args: string) -> string is
     let ps: [model::Profile] = profiles::all()
-    let sel: int = sync::atomic_load("profile_idx")
-    let mut out: string = "<h2>Profil instalacji</h2><div class=\"col\">"
+    let mut items: [string] = []
     let mut i: int = 0
     while i < ps.len() is
-        let net: string = if profiles::needs_network(ps[i]) then "  [wymaga sieci]" else ""
-        out = out + pick_item("h_pick_profile", "profile", i, i == sel, ps[i].label + net)
+        items.push(profile_obj(ps[i]))
         i += 1
     end
-    out = out + "</div>"
-    if sel >= 0 && sel < ps.len() is
-        out = out + "<p>" + html_escape(ps[sel].description) + "</p>"
-        if ps[sel].packages.len() > 0 is
-            out = out + "<p class=\"muted\">Pakiety: " + html_escape(str::join(ps[sel].packages, ", ")) + "</p>"
-        end
-    end
-    out = out + "<h2>Narzędzia programistyczne (opcjonalnie, wymagają sieci)</h2>" +
-        toggle_div(tg_hsharp(), flag("hsharp_on"), "Zainstaluj kompilator H# " + plan::hsharp_version()) +
-        toggle_div(tg_bit(), flag("bit_on"), "Zainstaluj menedżer pakietów bit " + plan::bit_version())
-    if (flag("hsharp_on") || flag("bit_on")) && !cfg.online is
-        out = out + "<p class=\"error\">Komputer jest offline — te narzędzia nie zostaną pobrane (instalacja i tak się powiedzie).</p>"
-    end
-    return out
+    return data::set_raw(data::object(), "profiles", arr(items))
 end
 
-fn render_account(a: app::App) -> string is
-    return "<h2>Utwórz konto użytkownika</h2>" +
-        "<div class=\"col\">" +
-            field(a, "Nazwa hosta", "hostname", "text", "hackeros") +
-            field(a, "Nazwa użytkownika", "username", "text", "") +
-            field(a, "Imię i nazwisko (opcjonalnie)", "fullname", "text", "") +
-            field(a, "Hasło", "password", "password", "") +
-            field(a, "Powtórz hasło", "password2", "password", "") +
-            toggle_div(tg_admin(), flag("admin_on"), "Konto administratora (sudo)") +
-            "<h2>Konto roota</h2>" +
-            "<p class=\"muted\">Zostaw puste, aby zablokować logowanie na roota (zalecane — używaj sudo).</p>" +
-            field(a, "Hasło roota (opcjonalnie)", "rootpw", "password", "") +
-            field(a, "Powtórz hasło roota", "rootpw2", "password", "") +
-        "</div>"
+;; ── komendy: nawigacja i walidacja ───────────────────────────────────
+
+fn cmd_validate_step(args: string) -> string is
+    let cfg: model::InstallConfig = cfg_from(args)
+    let mut r: validate::ValidationResult = validate::validate_step(cfg)
+    if r.ok && cfg.step == model::Step::Disk is
+        let free: model::FreeSpace = system_scan::detect_free_space(cfg.target_disk)
+        let ae: string = validate::alongside_error(cfg, free.size_mb)
+        if ae != "" is r = validate::ValidationResult { ok: false, message: ae } end
+    end
+    let o: string = data::set_bool(data::object(), "ok", r.ok)
+    return data::set_str(o, "message", r.message)
 end
 
-fn render_summary(a: app::App, cfg: model::InstallConfig) -> string is
-    let lines: [string] = config_io::summary_lines(cfg)
-    let mut body: string = "<h2>Podsumowanie</h2><div class=\"col\">"
-    let mut i: int = 0
-    while i < lines.len() is
-        body = body + "<p>" + html_escape(lines[i]) + "</p>"
-        i += 1
-    end
-    body = body + "</div>"
+;; Następny / poprzedni krok (z pominięciem „Partycji” poza trybem ręcznym).
+fn cmd_nav(args: string) -> string is
+    let cfg: model::InstallConfig = cfg_from(args)
+    let target: model::Step = if data::get_str(args, "dir") == "back" then steps::prev_for(cfg) else steps::next_for(cfg)
+    return data::set_int(data::object(), "step", steps::step_index(target))
+end
 
+fn cmd_summary(args: string) -> string is
+    let cfg: model::InstallConfig = cfg_from(args)
+    let o: string = data::set_raw(data::object(), "lines", data::str_array(config_io::summary_lines(cfg)))
     let plan_lines: [string] = installer_run::preview_plan(cfg)
-    body = body + toggle_div(tg_plan(), flag("show_plan"), "Pokaż pełny plan instalacji (" + to_string(plan_lines.len()) + " kroków)")
-    if flag("show_plan") is
-        body = body + "<div class=\"col plan\">"
-        let mut k: int = 0
-        while k < plan_lines.len() is
-            body = body + "<p class=\"plan-line\">" + html_escape(plan_lines[k]) + "</p>"
-            k += 1
-        end
-        body = body + "</div>"
-    end
-
-    if cfg.resume_available is
-        body = body + toggle_div(tg_resume(), flag("resume_on"),
-            "Wznów poprzednią próbę (pomiń już wykonane kroki) — odznacz, aby zacząć od zera")
-    end
-
-    let warn: string = if cfg.partition_mode == "auto" then "Rozumiem, że dysk zostanie wymazany, i chcę kontynuować"
-        elsif cfg.partition_mode == "alongside" then "Rozumiem, że zmiany obejmą tablicę partycji i bootloader, i chcę kontynuować"
-        else "Rozumiem, że zaznaczone partycje zostaną sformatowane, i chcę kontynuować"
-    body = body + toggle_div(tg_accept(), flag("accepted"), warn)
-    return body
+    return data::set_raw(o, "plan", data::str_array(plan_lines))
 end
 
-fn bar(percent: int) -> string is
-    let on: int = percent * 40 / 100
-    let mut out: string = "<div class=\"bar\">"
-    let mut i: int = 0
-    while i < 40 is
-        out = out + "<div class=\"" + (if i < on then "bar-seg on" else "bar-seg") + "\"></div>"
-        i += 1
-    end
-    return out + "</div>"
+;; ── komendy: instalacja ──────────────────────────────────────────────
+
+fn cmd_probe_install(args: string) -> string is
+    let cfg: model::InstallConfig = cfg_from(args)
+    return data::set_str(data::object(), "state", installer_run::probe(cfg))
 end
 
-fn render_installing() -> string is
+fn cmd_start_install(args: string) -> string is
+    let cfg: model::InstallConfig = cfg_from(args)
+    let resume: bool = data::get_bool(args, "resume")
+    config_io::save_resume(cfg)
+    let err: string = installer_run::start(cfg, resume)
+    if err != "" is return err_obj(err) end
+    return ok_obj()
+end
+
+fn cmd_poll_install(args: string) -> string is
     let p: model::Progress = installer_run::poll()
     let r: model::InstallResult = installer_run::result()
-    let mut out: string = "<h2>Trwa instalacja</h2>" + bar(p.percent) +
-        "<p>" + to_string(p.percent) + "% — krok " + to_string(p.step + 1) + " z " + to_string(p.total) + "</p>" +
-        "<p class=\"muted\">" + html_escape(p.label) + "</p>"
-    let mut start: int = r.steps.len() - 6
-    if start < 0 is start = 0 end
-    let mut i: int = start
-    out = out + "<div class=\"col\">"
-    while i < r.steps.len() is
-        let s: model::InstallStepResult = r.steps[i]
-        if s.status != "skip" is
-            let cls: string = if s.status == "ok" then "result-line ok" elsif s.status == "warn" then "result-line warn" else "result-line fail"
-            out = out + "<div class=\"" + cls + "\"><span>" + html_escape(s.label) + "</span></div>"
-        end
-        i += 1
-    end
-    return out + "</div><p class=\"muted\">Nie wyłączaj komputera. Okno można bezpiecznie zamknąć — instalacja działa w tle.</p>"
-end
-
-fn last_lines(text: string, n: int) -> string is
-    let lines: [string] = str::split(text, "\n")
-    let mut start: int = lines.len() - n
-    if start < 0 is start = 0 end
-    let mut out: [string] = []
-    let mut i: int = start
-    while i < lines.len() is
-        out.push(lines[i])
-        i += 1
-    end
-    return str::join(out, "\n")
-end
-
-fn render_done(a: app::App, ok: bool) -> string is
-    let r: model::InstallResult = installer_run::result()
-    let title: string = if ok then "HackerOS został zainstalowany" else "Instalacja nie powiodła się"
-    let mut body: string = "<h2>" + title + "</h2><div class=\"col\">"
-
-    if !ok && r.failed_label != "" is
-        body = body + "<p class=\"error\">Błąd w kroku: " + html_escape(r.failed_label) + " (kod wyjścia " + to_string(r.failed_code) + ")</p>"
-        if r.error_text != "" is
-            let tail: [string] = str::split(last_lines(r.error_text, 8), "\n")
-            let mut t: int = 0
-            while t < tail.len() is
-                body = body + "<p class=\"muted\">" + html_escape(tail[t]) + "</p>"
-                t += 1
-            end
-        end
-    end
-
+    let mut items: [string] = []
     let mut i: int = 0
     while i < r.steps.len() is
-        let s: model::InstallStepResult = r.steps[i]
-        if s.status != "skip" is
-            let cls: string = if s.status == "ok" then "result-line ok" elsif s.status == "warn" then "result-line warn" else "result-line fail"
-            let prefix: string = if s.status == "ok" then "OK    " elsif s.status == "warn" then "OSTRZEŻENIE  " else "BŁĄD  "
-            body = body + "<div class=\"" + cls + "\"><span>" + prefix + html_escape(s.label) + "</span></div>"
-        end
+        let mut s: string = data::set_str(data::object(), "label", r.steps[i].label)
+        s = data::set_str(s, "status", r.steps[i].status)
+        items.push(data::set_int(s, "code", r.steps[i].code))
         i += 1
     end
-    body = body + "</div><p class=\"muted\">Pełny log: " + html_escape(r.log_path) + "</p>"
-    if installer_run::warning_count(r) > 0 is
-        body = body + "<p class=\"muted\">Kroki oznaczone jako OSTRZEŻENIE były opcjonalne i nie powiodły się (np. brak sieci) — system jest zainstalowany.</p>"
+    let mut o: string = data::set_str(data::object(), "state", p.state)
+    o = data::set_int(o, "step", p.step)
+    o = data::set_int(o, "total", p.total)
+    o = data::set_str(o, "label", p.label)
+    o = data::set_int(o, "percent", p.percent)
+    o = data::set_raw(o, "steps", arr(items))
+    o = data::set_str(o, "failed_label", r.failed_label)
+    o = data::set_int(o, "failed_code", r.failed_code)
+    o = data::set_str(o, "error_text", r.error_text)
+    o = data::set_int(o, "warnings", installer_run::warning_count(r))
+    o = data::set_str(o, "log_path", r.log_path)
+    if data::get_bool(args, "with_log") is
+        o = data::set_str(o, "log_tail", installer_run::log_tail(40))
     end
-    if ok is
-        body = body + "<div class=\"btn primary\" on-click=\"do_reboot\"><span>Uruchom ponownie</span></div>"
-    else is
-        body = body + "<div class=\"row\"><div class=\"btn primary\" on-click=\"h_retry\"><span>Wznów instalację od miejsca błędu</span></div>" +
-            "<div class=\"btn ghost\" on-click=\"do_reboot\"><span>Uruchom ponownie</span></div></div>"
-    end
-    return body
+    if p.state == "ok" is config_io::clear_resume_config() end
+    return o
 end
 
-fn render(a: app::App, cfg: model::InstallConfig, error_msg: string) -> string is
-    let mut body: string = ""
-    match cfg.step is
-        model::Step::Welcome    => body = render_welcome(a)
-        model::Step::Language   => body = render_language(sync::atomic_load("locale_idx"))
-        model::Step::Keyboard   => body = render_keyboard(sync::atomic_load("keyboard_idx"))
-        model::Step::Timezone   => body = render_timezone(sync::atomic_load("timezone_idx"))
-        model::Step::Network    => body = render_network(a, cfg)
-        model::Step::Disk       => body = render_disk(a, cfg)
-        model::Step::Partitions => body = render_partitions(a, cfg)
-        model::Step::Profile    => body = render_profile(a, cfg)
-        model::Step::Account    => body = render_account(a)
-        model::Step::Summary    => body = render_summary(a, cfg)
-        model::Step::Installing => body = render_installing()
-        model::Step::Done       => body = render_done(a, flag("install_ok"))
-    end
+fn cmd_load_resume(args: string) -> string is
+    let base: model::InstallConfig = model::default_config("standard")
+    let cfg: model::InstallConfig = config_io::load_resume(base)
+    return data::set_raw(data::object(), "config", cfg_obj(cfg))
+end
 
-    let mut err_html: string = ""
-    if error_msg != "" is
-        err_html = "<p class=\"error\">" + html_escape(error_msg) + "</p>"
-    end
-
-    let next_label: string = if cfg.step == model::Step::Summary then "Instaluj" else "Dalej"
-
-    return
-        "<div class=\"page\"><div class=\"card\">" +
-            step_dots(cfg.step) +
-            "<p class=\"muted\">" + steps::step_title(cfg.step) + " — " + steps::step_subtitle(cfg.step) + "</p>" +
-            body +
-            err_html +
-            nav_row(cfg, next_label) +
-        "</div></div>"
+fn cmd_reboot(args: string) -> string is
+    process::run("reboot || systemctl reboot")
+    return ok_obj()
 end
 
 ;; ── punkt wejścia ────────────────────────────────────────────────────
 
-fn init_state(a0: app::App) -> app::App is
-    let mut a: app::App = a0
-    sync::atomic_new("step", steps::step_index(model::Step::Welcome))
-    sync::atomic_new("want_next", 0)
-    sync::atomic_new("want_prev", 0)
-    sync::atomic_new("act", 0)
-    sync::atomic_new("act_arg", 0)
-    sync::atomic_new("dirty", 1)
-    sync::atomic_new("enter_pending", 0)
-
-    sync::atomic_new("locale_idx", 0)
-    sync::atomic_new("keyboard_idx", 0)
-    sync::atomic_new("timezone_idx", 0)
-
-    sync::atomic_new("disk_idx", -1)
-    sync::atomic_new("mode_idx", 0)
-    sync::atomic_new("fs_idx", 0)
-    sync::atomic_new("swap_on", 1)
-    sync::atomic_new("luks_on", 0)
-    sync::atomic_new("parts_inited", 0)
-
-    sync::atomic_new("online", 0)
-    sync::atomic_new("connecting", 0)
-    sync::atomic_new("mirror_idx", 0)
-
-    sync::atomic_new("profile_idx", 0)
-    sync::atomic_new("hsharp_on", 0)
-    sync::atomic_new("bit_on", 0)
-
-    sync::atomic_new("admin_on", 1)
-    sync::atomic_new("accepted", 0)
-    sync::atomic_new("show_plan", 0)
-    sync::atomic_new("resume_available", 0)
-    sync::atomic_new("resume_on", 0)
-
-    sync::atomic_new("uefi", util::b2i(system_scan::detect_uefi()))
-    sync::atomic_new("install_ok", 0)
-    sync::atomic_new("idle_ticks", 0)
-
-    let mut i: int = 0
-    while i < max_parts() is
-        sync::atomic_new("pf" + to_string(i), 0)
-        sync::atomic_new("pfs" + to_string(i), 0)
-        i += 1
-    end
-
-    a = set_v(a, "hostname", system_scan::default_hostname())
-    a = set_v(a, "swap_mb", "2048")
-    return a
-end
+fn font_path() -> string is return "frontend/fonts/DejaVuSans.ttf" end
 
 fn main() is
-    let mut a: app::App = app::new("Instalator HackerOS", 860, 680)
-    a = app::with_font(a, "frontend/fonts/DejaVuSans.ttf", 16)
+    let mut a: app::App = app::new("Instalator HackerOS", 960, 700)
+    ;; font opcjonalny: bez pliku .ttf Silver używa domyślnego fontu systemowego
+    if fs::exists(font_path()) is a = app::with_font(a, font_path(), 16) end
+    a = app::set_min_size(a, 760, 560)
+
+    a = app::load_html(a, "frontend/index.html")
     a = app::load_css(a, "frontend/style.css")
-    a = init_state(a)
 
-    a = app::command(a, "go_next", go_next)
-    a = app::command(a, "go_prev", go_prev)
-    a = app::command(a, "cycle_next", h_cycle_next)
-    a = app::command(a, "cycle_prev", h_cycle_prev)
-    a = app::command(a, "h_pick_disk", h_pick_disk)
-    a = app::command(a, "h_mode", h_mode)
-    a = app::command(a, "h_fs", h_fs)
-    a = app::command(a, "h_toggle", h_toggle)
-    a = app::command(a, "h_pick_wifi", h_pick_wifi)
-    a = app::command(a, "h_wifi_scan", h_wifi_scan)
-    a = app::command(a, "h_wifi_connect", h_wifi_connect)
-    a = app::command(a, "h_net_check", h_net_check)
-    a = app::command(a, "h_pick_mirror", h_pick_mirror)
-    a = app::command(a, "h_pick_profile", h_pick_profile)
-    a = app::command(a, "h_os_rescan", h_os_rescan)
-    a = app::command(a, "h_pfs", h_pfs)
-    a = app::command(a, "h_pfmt", h_pfmt)
-    a = app::command(a, "h_gparted", h_gparted)
-    a = app::command(a, "h_load_resume", h_load_resume)
-    a = app::command(a, "h_retry", h_retry)
-    a = app::command(a, "do_reboot", do_reboot)
+    a = app::command(a, "bootstrap", cmd_bootstrap)
+    a = app::command(a, "network_status", cmd_network_status)
+    a = app::command(a, "wifi_scan", cmd_wifi_scan)
+    a = app::command(a, "wifi_connect", cmd_wifi_connect)
+    a = app::command(a, "wifi_poll", cmd_wifi_poll)
+    a = app::command(a, "list_disks", cmd_list_disks)
+    a = app::command(a, "disk_info", cmd_disk_info)
+    a = app::command(a, "probe_os", cmd_probe_os)
+    a = app::command(a, "open_gparted", cmd_open_gparted)
+    a = app::command(a, "list_profiles", cmd_list_profiles)
+    a = app::command(a, "validate_step", cmd_validate_step)
+    a = app::command(a, "nav", cmd_nav)
+    a = app::command(a, "summary", cmd_summary)
+    a = app::command(a, "probe_install", cmd_probe_install)
+    a = app::command(a, "start_install", cmd_start_install)
+    a = app::command(a, "poll_install", cmd_poll_install)
+    a = app::command(a, "load_resume", cmd_load_resume)
+    a = app::command(a, "reboot", cmd_reboot)
 
-    ;; tick co 100 ms: odbiera kliknięcia, odpytuje instalację w tle
-    a = app::set_tick_interval(a, 100)
-    a = app::on_tick(a, tick)
-
-    ;; Pierwszy render ręcznie, przed app::run — tak ekran startowy nie jest pusty.
-    let first_cfg: model::InstallConfig = build_cfg(a)
-    a = app::load_html_str(a, render(a, first_cfg, ""))
-    sync::atomic_store("dirty", 0)
-
+    ;; zbudowany bundle (esbuild) — patrz frontend/package.json
+    a = app::load_js(a, ["frontend/dist/app.js"])
     app::run(a)
 end
