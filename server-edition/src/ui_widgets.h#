@@ -1,0 +1,74 @@
+use "bit -> tui"     from "tui"
+use "std -> strings" from "str"
+
+mod model
+mod steps
+mod ui_state
+
+;; ── widoki ────────────────────────────────────────────────────────
+
+pub fn panel_style() -> any is
+    return tui::style_padding(tui::style_border(tui::style_new(), "rounded"), 2, 1)
+end
+
+pub fn title_style() -> any is
+    return tui::style_bold(tui::style_fg(tui::style_new(), "cyan"), true)
+end
+
+pub fn error_style() -> any is
+    return tui::style_bold(tui::style_fg(tui::style_new(), "red"), true)
+end
+
+pub fn step_dots(current: model::Step) -> string is
+    let cur_i: int = steps::step_index(current)
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < steps::step_count() is
+        let mark: string = if i <= cur_i then "●" else "○"
+        let color: string = if i == cur_i then "cyan" elsif i < cur_i then "green" else "8"
+        out = out + tui::colorize(mark, color) + " "
+        i += 1
+    end
+    return out
+end
+
+pub fn header(m: ui_state::Model) -> string is
+    return step_dots(m.step) + "\n" +
+        tui::style_render(title_style(), steps::step_title(m.step)) + " — " + steps::step_subtitle(m.step)
+end
+
+pub fn error_block(m: ui_state::Model) -> string is
+    if m.error_msg == "" is return "" end
+    return "\n" + tui::style_render(error_style(), m.error_msg)
+end
+
+pub fn marker(on: bool) -> string is
+    return if on then tui::colorize("> ", "cyan") else "  "
+end
+
+pub fn check(on: bool) -> string is
+    return if on then "[x]" else "[ ]"
+end
+
+pub fn field_line(label: string, ti: any, focused: bool) -> string is
+    return marker(focused) + label + ": " + (if focused then tui::textinput_view(ti) else tui::textinput_view(tui::textinput_focus(ti, false)))
+end
+
+;; Pole hasła: gwiazdki zamiast znaków (textinput z tui nie ma trybu hasła).
+pub fn mask_view(ti: any, focused: bool, placeholder: string) -> string is
+    let n: int = tui::textinput_value(ti).len()
+    if n == 0 is
+        return if focused then tui::style_render(tui::style_bg(tui::style_new(), "white"), " ") + tui::colorize(placeholder, "8")
+            else tui::colorize(placeholder, "8")
+    end
+    let stars: string = str::repeat("*", n)
+    return if focused then stars + tui::style_render(tui::style_bg(tui::style_new(), "white"), " ") else stars
+end
+
+pub fn pw_line(label: string, ti: any, focused: bool, placeholder: string) -> string is
+    return marker(focused) + label + ": " + mask_view(ti, focused, placeholder)
+end
+
+pub fn section(title: string, focused: bool) -> string is
+    return (if focused then tui::colorize(title, "cyan") else title)
+end
