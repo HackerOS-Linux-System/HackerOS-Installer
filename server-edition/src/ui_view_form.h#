@@ -1,0 +1,148 @@
+use "bit -> tui"     from "tui"
+use "std -> strings" from "str"
+
+mod model
+mod system_scan
+mod network
+mod profiles
+mod validate
+mod plan
+mod config_io
+mod ui_state
+mod ui_cfg
+mod ui_widgets
+
+pub fn view_welcome(m: ui_state::Model) -> string is
+    let resume_line: string = if config_io::has_resume_config()
+        then "\n" + tui::colorize("Znaleziono konfigurację przerwanej instalacji — naciśnij l, aby ją wczytać.", "yellow") + "\n"
+        else ""
+    return ui_widgets::header(m) + "\n\n" +
+        tui::wrap_text("Ten kreator przeprowadzi Cię przez instalację HackerOS (Server Edition, TTY) na tym komputerze.",
+            if m.term_w - 6 >= 40 then m.term_w - 6 else 74) + "\n" +
+        resume_line +
+        tui::help_view(["enter", "l", "q"], ["dalej", "wczytaj zapisaną konfigurację", "wyjście"])
+end
+
+pub fn view_choice(m: ui_state::Model, list: any) -> string is
+    return ui_widgets::header(m) + "\n\n" + tui::list_view(list) + ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["↑/↓", "enter", "esc"], ["wybierz", "dalej", "wstecz"])
+end
+
+pub fn view_network(m: ui_state::Model) -> string is
+    let status: string = if m.online then tui::colorize("Połączono z Internetem.", "green")
+        else tui::style_render(ui_widgets::error_style(), "Brak połączenia z Internetem (możesz kontynuować offline z profilem Minimalny).")
+    let mut out: string = ui_widgets::header(m) + "\n\n" + status + "\n\n"
+    if network::wifi_available() is
+        out = out + ui_widgets::section("Sieci Wi-Fi", m.focus == 0) + "\n" + tui::list_view(m.wifi_list) + "\n" +
+            ui_widgets::pw_line("Hasło sieci", m.wifi_pw, m.focus == 1, "hasło sieci") + "\n"
+        if m.wifi_msg != "" is out = out + tui::colorize(m.wifi_msg, "yellow") + "\n" end
+        out = out + "\n"
+    else is
+        out = out + tui::colorize("Brak karty Wi-Fi / NetworkManagera — użyj kabla sieciowego.", "8") + "\n\n"
+    end
+    out = out + ui_widgets::section("Serwer pakietów", m.focus == 2) + "\n" + tui::list_view(m.mirror_list) + "\n"
+    if network::mirror_ids()[tui::list_selected_index(m.mirror_list)] == "custom" is
+        out = out + ui_widgets::field_line("Adres serwera", m.mirror_url, m.focus == 3) + "\n"
+    end
+    return out + ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["tab", "↑/↓", "c", "r", "n", "enter", "esc"],
+            ["pole", "wybierz", "połącz", "skanuj", "sprawdź sieć", "dalej", "wstecz"])
+end
+
+pub fn view_disk(m: ui_state::Model) -> string is
+    let d_idx: int = tui::list_selected_index(m.disk_list)
+    let mode: int = tui::list_selected_index(m.mode_list)
+    let disk: string = ui_cfg::current_disk(m)
+    let mut out: string = ui_widgets::header(m) + "\n\n" + ui_widgets::section("Dysk", m.focus == 0) + "\n" + tui::list_view(m.disk_list) + "\n"
+    if d_idx >= 0 && d_idx < m.disks.len() && m.disks[d_idx].removable is
+        out = out + tui::style_render(ui_widgets::error_style(), "Uwaga: to urządzenie jest oznaczone jako wymienne (USB?).") + "\n"
+    end
+
+    let others: [model::OtherOs] = system_scan::other_os_on_disk(system_scan::parse_other_os(m.os_raw), disk)
+    if others.len() > 0 is
+        out = out + tui::colorize("Wykryte systemy na tym dysku:", "yellow") + "\n"
+        let mut o: int = 0
+        while o < others.len() is
+            out = out + "  • " + model::other_os_label(others[o]) + "\n"
+            o += 1
+        end
+    elsif !system_scan::os_prober_available() is
+        out = out + tui::colorize("Brak os-prober — nie można wykryć innych systemów.", "8") + "\n"
+    end
+
+    out = out + "\n" + ui_widgets::section("Partycjonowanie", m.focus == 1) + "\n" + tui::list_view(m.mode_list) + "\n"
+    if mode == 0 is
+        out = out + tui::style_render(ui_widgets::error_style(), "Cała zawartość dysku " + disk + " zostanie trwale usunięta.") + "\n"
+    elsif mode == 1 is
+        let free: model::FreeSpace = system_scan::detect_free_space(disk)
+        out = out + "Wolne miejsce do użycia: " + to_string(free.size_mb) + " MiB (wymagane " +
+            to_string(validate::alongside_min_mb()) + " MiB). Istniejące partycje nie są ruszane.\n"
+    else is
+        out = out + "Na następnym ekranie przypiszesz punkty montowania do istniejących partycji.\n"
+    end
+
+    if mode != 2 is
+        out = out + "\n" + ui_widgets::section("System plików", m.focus == 2) + "\n" + tui::list_view(m.fs_list) + "\n" +
+            ui_widgets::marker(m.focus == 3) + ui_widgets::check(m.swap_on) + " Plik wymiany (spacja)\n"
+        if m.swap_on is out = out + ui_widgets::field_line("Rozmiar swap (MiB)", m.swap_input, m.focus == 4) + "\n" end
+    end
+    out = out + ui_widgets::marker(m.focus == 5) + ui_widgets::check(m.luks_on) + " Zaszyfruj dysk (LUKS2) (spacja)\n"
+    if m.luks_on is
+        out = out + ui_widgets::pw_line("Hasło szyfrowania", m.luks_pw, m.focus == 6, "min. 8 znaków") + "\n" +
+            ui_widgets::pw_line("Powtórz hasło     ", m.luks_pw2, m.focus == 7, "powtórz") + "\n" +
+            tui::colorize("Powstanie niezaszyfrowana partycja /boot (1 GiB).", "8") + "\n"
+    end
+    return out + ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["tab", "↑/↓", "spacja", "r", "enter", "esc"],
+            ["następne pole", "wybierz", "przełącz", "skanuj systemy", "dalej", "wstecz"])
+end
+
+pub fn view_partitions(m: ui_state::Model) -> string is
+    let mut out: string = ui_widgets::header(m) + "\n\n"
+    if m.parts.len() == 0 is
+        return out + tui::style_render(ui_widgets::error_style(), "Na dysku nie ma partycji. Utwórz je (np. cfdisk/parted) i wróć do tego kroku.") +
+            ui_widgets::error_block(m) + "\n" + tui::help_view(["esc"], ["wstecz"])
+    end
+    out = out + tui::colorize("Punkt montowania: /, /home, /boot, /boot/efi, swap — puste = nieużywana.", "8") + "\n\n"
+    let mut i: int = 0
+    while i < m.parts.len() is
+        let sel: bool = i == m.part_row
+        let ti: any = tui::textinput_focus(m.mp_inputs[i], sel)
+        out = out + ui_widgets::marker(sel) + model::part_label(m.parts[i]) + "\n" +
+            "      punkt: " + tui::textinput_view(ti) + "   fs: " + ui_state::fs_options()[m.part_fs[i]] + "   " +
+            (if m.part_fmt[i] then tui::colorize("[FORMATUJ]", "red") else "[zachowaj dane]") + "\n"
+        i += 1
+    end
+    return out + ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["↑/↓", "wpisz", "ctrl+k", "ctrl+d", "enter", "esc"],
+            ["partycja", "punkt montowania", "system plików", "formatuj/zachowaj", "dalej", "wstecz"])
+end
+
+pub fn view_profile(m: ui_state::Model) -> string is
+    let ps: [model::Profile] = profiles::all()
+    let sel: int = tui::list_selected_index(m.profile_list)
+    let mut out: string = ui_widgets::header(m) + "\n\n" + tui::list_view(m.profile_list) + "\n"
+    if sel >= 0 && sel < ps.len() && ps[sel].packages.len() > 0 is
+        out = out + tui::colorize("Pakiety: " + str::join(ps[sel].packages, ", "), "8") + "\n"
+    end
+    out = out + "\nNarzędzia programistyczne (opcjonalnie, wymagają sieci):\n" +
+        "  " + ui_widgets::check(m.hsharp_on) + " [h] kompilator H# " + plan::hsharp_version() + "\n" +
+        "  " + ui_widgets::check(m.bit_on) + " [b] menedżer pakietów bit " + plan::bit_version() + "\n"
+    return out + ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["↑/↓", "h", "b", "enter", "esc"], ["profil", "H#", "bit", "dalej", "wstecz"])
+end
+
+pub fn view_account(m: ui_state::Model) -> string is
+    return ui_widgets::header(m) + "\n\n" +
+        ui_widgets::field_line("Nazwa hosta          ", m.hostname_input, m.focus == 0) + "\n" +
+        ui_widgets::field_line("Nazwa użytkownika    ", m.username_input, m.focus == 1) + "\n" +
+        ui_widgets::field_line("Imię i nazwisko      ", m.fullname_input, m.focus == 2) + "\n" +
+        ui_widgets::pw_line("Hasło               ", m.password_input, m.focus == 3, "hasło") + "\n" +
+        ui_widgets::pw_line("Powtórz hasło       ", m.password2_input, m.focus == 4, "powtórz hasło") + "\n" +
+        ui_widgets::marker(m.focus == 7) + ui_widgets::check(m.admin_on) + " Konto administratora (sudo)\n\n" +
+        tui::colorize("Konto roota — puste hasło = logowanie zablokowane (zalecane):", "8") + "\n" +
+        ui_widgets::pw_line("Hasło roota         ", m.rootpw_input, m.focus == 5, "puste = zablokowany") + "\n" +
+        ui_widgets::pw_line("Powtórz hasło roota ", m.rootpw2_input, m.focus == 6, "powtórz hasło roota") +
+        ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["tab", "spacja", "enter", "esc"], ["następne pole", "przełącz admin", "dalej", "wstecz"])
+end
