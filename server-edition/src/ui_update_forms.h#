@@ -1,0 +1,186 @@
+use "bit -> tui"     from "tui"
+
+mod model
+mod system_scan
+mod network
+mod ui_state
+mod ui_cfg
+mod ui_nav
+
+;; ── update: Network ───────────────────────────────────────────────────
+
+pub fn update_network(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "tab") is
+        n.focus = ui_nav::next_visible(m, m.focus, 4)
+        return n
+    end
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+
+    ;; focus: 0 lista Wi-Fi · 1 hasło · 2 lista serwerów · 3 własny URL
+    if m.focus == 0 is
+        if tui::msg_is_key(msg, "r") is return ui_nav::refresh_wifi(m, true) end
+        if tui::msg_is_key(msg, "n") is
+            n.online = network::is_online()
+            return n
+        end
+        if tui::msg_is_key(msg, "c") is return start_connect(m) end
+        if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+        n.wifi_list = tui::list_update(m.wifi_list, msg)
+        return n
+    end
+    if m.focus == 1 is
+        if tui::msg_is_key(msg, "enter") is return start_connect(m) end
+        n.wifi_pw = tui::textinput_update(m.wifi_pw, msg)
+        return n
+    end
+    if m.focus == 2 is
+        if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+        n.mirror_list = tui::list_update(m.mirror_list, msg)
+        return n
+    end
+    if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+    n.mirror_url = tui::textinput_update(m.mirror_url, msg)
+    return n
+end
+
+pub fn start_connect(m: ui_state::Model) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    let idx: int = tui::list_selected_index(m.wifi_list)
+    if idx < 0 || idx >= m.wifi_nets.len() is
+        n.wifi_msg = "Brak wybranej sieci."
+        return n
+    end
+    let net: model::WifiNet = m.wifi_nets[idx]
+    network::connect_start(net.ssid, ui_cfg::tv(m.wifi_pw))
+    n.connecting = true
+    n.wifi_msg = "Łączenie z " + net.ssid + "…"
+    return n
+end
+
+;; ── update: Disk ──────────────────────────────────────────────────────
+;; focus: 0 dyski · 1 tryb · 2 system plików · 3 swap · 4 rozmiar swap ·
+;;        5 LUKS · 6 hasło LUKS · 7 powtórz hasło LUKS
+
+pub fn update_disk(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "tab") is
+        n.focus = ui_nav::next_visible(m, m.focus, 8)
+        return n
+    end
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+
+    if m.focus == 0 is
+        if tui::msg_is_key(msg, "r") is
+            n.os_raw = system_scan::probe_other_os_raw()
+            return n
+        end
+        n.disk_list = tui::list_update(m.disk_list, msg)
+    elsif m.focus == 1 is
+        n.mode_list = tui::list_update(m.mode_list, msg)
+    elsif m.focus == 2 is
+        n.fs_list = tui::list_update(m.fs_list, msg)
+    elsif m.focus == 3 is
+        if tui::msg_is_key(msg, "space") is n.swap_on = !m.swap_on end
+    elsif m.focus == 4 is
+        n.swap_input = tui::textinput_update(m.swap_input, msg)
+    elsif m.focus == 5 is
+        if tui::msg_is_key(msg, "space") is n.luks_on = !m.luks_on end
+    elsif m.focus == 6 is
+        n.luks_pw = tui::textinput_update(m.luks_pw, msg)
+    else is
+        n.luks_pw2 = tui::textinput_update(m.luks_pw2, msg)
+    end
+    return n
+end
+
+;; ── update: Partycje ──────────────────────────────────────────────────
+
+pub fn update_partitions(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+    if m.parts.len() == 0 is return m end
+
+    if tui::msg_is_key(msg, "down") || tui::msg_is_key(msg, "tab") is
+        n.part_row = (m.part_row + 1) % m.parts.len()
+        return n
+    end
+    if tui::msg_is_key(msg, "up") is
+        n.part_row = (m.part_row + m.parts.len() - 1) % m.parts.len()
+        return n
+    end
+    if tui::msg_is_key(msg, "ctrl+k") is
+        n.part_fs = ui_cfg::set_int(m.part_fs, m.part_row, (m.part_fs[m.part_row] + 1) % ui_state::fs_options().len())
+        return n
+    end
+    if tui::msg_is_key(msg, "ctrl+d") is
+        n.part_fmt = ui_cfg::set_bool(m.part_fmt, m.part_row, !m.part_fmt[m.part_row])
+        return n
+    end
+    n.mp_inputs = ui_cfg::set_any(m.mp_inputs, m.part_row, tui::textinput_update(m.mp_inputs[m.part_row], msg))
+    return n
+end
+
+;; ── update: Profil ────────────────────────────────────────────────────
+
+pub fn update_profile(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+    if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+    if tui::msg_is_key(msg, "h") is
+        n.hsharp_on = !m.hsharp_on
+        return n
+    end
+    if tui::msg_is_key(msg, "b") is
+        n.bit_on = !m.bit_on
+        return n
+    end
+    n.profile_list = tui::list_update(m.profile_list, msg)
+    return n
+end
+
+;; ── update: Konto ─────────────────────────────────────────────────────
+;; focus: 0 host · 1 użytkownik · 2 imię · 3 hasło · 4 powtórz · 5 root · 6 powtórz root · 7 admin
+
+pub fn focused_textinput(m: ui_state::Model) -> any is
+    if m.focus == 0 is return m.hostname_input end
+    if m.focus == 1 is return m.username_input end
+    if m.focus == 2 is return m.fullname_input end
+    if m.focus == 3 is return m.password_input end
+    if m.focus == 4 is return m.password2_input end
+    if m.focus == 5 is return m.rootpw_input end
+    return m.rootpw2_input
+end
+
+pub fn with_focused_textinput(m: ui_state::Model, ti: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if m.focus == 0 is n.hostname_input = ti end
+    if m.focus == 1 is n.username_input = ti end
+    if m.focus == 2 is n.fullname_input = ti end
+    if m.focus == 3 is n.password_input = ti end
+    if m.focus == 4 is n.password2_input = ti end
+    if m.focus == 5 is n.rootpw_input = ti end
+    if m.focus == 6 is n.rootpw2_input = ti end
+    return n
+end
+
+pub fn update_account(m: ui_state::Model, msg: any) -> ui_state::Model is
+    if tui::msg_is_key(msg, "tab") is
+        let mut n: ui_state::Model = m
+        n.focus = (m.focus + 1) % 8
+        return n
+    end
+    if tui::msg_is_key(msg, "enter") is return ui_nav::try_advance(m) end
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+    if m.focus == 7 is
+        if tui::msg_is_key(msg, "space") is
+            let mut n: ui_state::Model = m
+            n.admin_on = !m.admin_on
+            return n
+        end
+        return m
+    end
+    return with_focused_textinput(m, tui::textinput_update(focused_textinput(m), msg))
+end
