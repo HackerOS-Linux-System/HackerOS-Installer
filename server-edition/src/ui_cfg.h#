@@ -1,0 +1,109 @@
+use "bit -> tui"     from "tui"
+use "std -> strings" from "str"
+
+mod model
+mod util
+mod network
+mod profiles
+mod locales
+mod ui_state
+
+;; ── InstallConfig z bieżącego modelu ─────────────────────────────────
+
+pub fn tv(ti: any) -> string is return tui::textinput_value(ti) end
+
+pub fn current_disk(m: ui_state::Model) -> string is
+    let d_idx: int = tui::list_selected_index(m.disk_list)
+    if d_idx >= 0 && d_idx < m.disks.len() is return m.disks[d_idx].device end
+    return ""
+end
+
+pub fn build_cfg(m: ui_state::Model) -> model::InstallConfig is
+    let mut cfg: model::InstallConfig = model::default_config("server")
+    cfg.step = m.step
+
+    cfg.locale   = locales::locale_codes()[tui::list_selected_index(m.locale_list)]
+    cfg.keyboard = locales::keyboard_codes()[tui::list_selected_index(m.keyboard_list)]
+    cfg.timezone = locales::timezone_codes()[tui::list_selected_index(m.timezone_list)]
+
+    cfg.online = m.online
+    cfg.mirror_id = network::mirror_ids()[tui::list_selected_index(m.mirror_list)]
+    cfg.mirror_url = str::trim(tv(m.mirror_url))
+
+    cfg.target_disk = current_disk(m)
+    cfg.partition_mode = ui_state::mode_ids()[tui::list_selected_index(m.mode_list)]
+    cfg.filesystem = ui_state::root_fs_options()[tui::list_selected_index(m.fs_list)]
+    cfg.enable_swap = m.swap_on
+    cfg.swap_size_mb = util::to_int_or(tv(m.swap_input), 0)
+    cfg.luks = m.luks_on
+    cfg.luks_password = tv(m.luks_pw)
+    cfg.luks_confirm = tv(m.luks_pw2)
+
+    if cfg.partition_mode == "manual" is
+        let mut specs: [model::PartSpec] = []
+        let mut i: int = 0
+        while i < m.parts.len() is
+            let mp: string = str::trim(tv(m.mp_inputs[i]))
+            if mp != "" is
+                specs.push(model::PartSpec {
+                    device: m.parts[i].device, mountpoint: mp,
+                    fs: ui_state::fs_options()[m.part_fs[i]], format: m.part_fmt[i]
+                })
+            end
+            i += 1
+        end
+        cfg.manual_parts = specs
+    end
+
+    cfg.profile = profiles::ids()[tui::list_selected_index(m.profile_list)]
+    cfg.install_hsharp = m.hsharp_on
+    cfg.install_bit = m.bit_on
+
+    let hostname_val: string = str::trim(tv(m.hostname_input))
+    cfg.hostname = if hostname_val == "" then "hackeros" else hostname_val
+    cfg.user.username  = str::trim(tv(m.username_input))
+    cfg.user.full_name = tv(m.fullname_input)
+    cfg.user.password  = tv(m.password_input)
+    cfg.user.is_admin  = m.admin_on
+    cfg.password_confirm = tv(m.password2_input)
+    cfg.root_password  = tv(m.rootpw_input)
+    cfg.root_confirm   = tv(m.rootpw2_input)
+
+    cfg.uefi = m.uefi
+    cfg.accepted_summary = m.accepted
+    cfg.resume_available = m.resume_available
+    cfg.resume = m.resume_on
+    return cfg
+end
+
+;; ── pomocnicze operacje na tablicach (bez indeksowanego przypisania) ─
+
+pub fn set_any(items: [any], idx: int, val: any) -> [any] is
+    let mut out: [any] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
+
+pub fn set_int(items: [int], idx: int, val: int) -> [int] is
+    let mut out: [int] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
+
+pub fn set_bool(items: [bool], idx: int, val: bool) -> [bool] is
+    let mut out: [bool] = []
+    let mut i: int = 0
+    while i < items.len() is
+        out.push(if i == idx then val else items[i])
+        i += 1
+    end
+    return out
+end
