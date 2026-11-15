@@ -1,0 +1,191 @@
+use "bit -> tui"     from "tui"
+
+mod model
+mod steps
+mod system_scan
+mod network
+mod validate
+mod installer_run
+mod config_io
+mod ui_state
+mod ui_cfg
+
+;; ── wejście do kroku (jednorazowe skanowanie) ────────────────────────
+
+pub fn refresh_wifi(m: ui_state::Model, rescan: bool) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    n.wifi_nets = network::scan_wifi(rescan)
+    let mut labels: [string] = []
+    let mut i: int = 0
+    while i < n.wifi_nets.len() && i < 8 is
+        labels.push(model::wifi_label(n.wifi_nets[i]))
+        i += 1
+    end
+    n.wifi_list = ui_state::list_from(labels)
+    return n
+end
+
+pub fn enter_step(m: ui_state::Model, step: model::Step) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    n.step = step
+    n.focus = 0
+    n.error_msg = ""
+
+    if step == model::Step::Network is
+        n.online = network::is_online()
+        n.wifi_msg = ""
+        if network::wifi_available() is n = refresh_wifi(n, true) end
+    elsif step == model::Step::Disk is
+        if !n.os_scanned is
+            n.os_raw = system_scan::probe_other_os_raw()
+            n.os_scanned = true
+        end
+    elsif step == model::Step::Partitions is
+        let disk: string = ui_cfg::current_disk(n)
+        let mut all: [model::PartInfo] = system_scan::detect_partitions(disk)
+        if all.len() > ui_state::max_parts() is
+            let mut cut: [model::PartInfo] = []
+            let mut k: int = 0
+            while k < ui_state::max_parts() is
+                cut.push(all[k])
+                k += 1
+            end
+            all = cut
+        end
+        ;; zachowujemy wpisane wartości, jeśli lista partycji się nie zmieniła
+        if all.len() != n.parts.len() is
+            n.parts = all
+            n.mp_inputs = []
+            n.part_fs = []
+            n.part_fmt = []
+            let mut i: int = 0
+            while i < all.len() is
+                n.mp_inputs.push(tui::textinput_new("punkt montowania"))
+                n.part_fs.push(if all[i].is_esp then 3 elsif all[i].fstype == "swap" then 4 else 0)
+                n.part_fmt.push(false)
+                i += 1
+            end
+        end
+        n.part_row = 0
+    elsif step == model::Step::Summary is
+        let st: string = installer_run::probe(ui_cfg::build_cfg(n))
+        n.resume_available = st == "resume"
+        n.resume_on = st == "resume"
+        n.accepted = false
+        n.show_plan = false
+        n.plan_scroll = 0
+        if st == "running" is
+            n.step = model::Step::Installing
+            n.idle_ticks = 0
+        end
+    end
+    return n
+end
+
+;; ── nawigacja ────────────────────────────────────────────────────────
+
+pub fn go_back(m: ui_state::Model) -> ui_state::Model is
+    if !steps::can_go_back(m.step) is return m end
+    return enter_step(m, steps::prev_for(ui_cfg::build_cfg(m)))
+end
+
+pub fn begin_install(m: ui_state::Model, resume: bool) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    let cfg: model::InstallConfig = ui_cfg::build_cfg(m)
+    config_io::save_resume(cfg)
+    let err: string = installer_run::start(cfg, resume)
+    if err != "" is
+        n.error_msg = err
+        return n
+    end
+    n.step = model::Step::Installing
+    n.idle_ticks = 0
+    n.error_msg = ""
+    return n
+end
+
+pub fn try_advance(m: ui_state::Model) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    let cfg: model::InstallConfig = ui_cfg::build_cfg(m)
+    let mut res: validate::ValidationResult = validate::validate_step(cfg)
+    if res.ok && cfg.step == model::Step::Disk is
+        let free: model::FreeSpace = system_scan::detect_free_space(cfg.target_disk)
+        let ae: string = validate::alongside_error(cfg, free.size_mb)
+        if ae != "" is res = validate::ValidationResult { ok: false, message: ae } end
+    end
+    if !res.ok is
+        n.error_msg = res.message
+        return n
+    end
+    if cfg.step == model::Step::Summary is
+        return begin_install(m, cfg.resume)
+    end
+    return enter_step(m, steps::next_for(cfg))
+end
+
+;; ── ticki: Wi-Fi w tle i postęp instalacji ───────────────────────────
+
+pub fn on_tick(m: ui_state::Model) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+
+    if n.connecting is
+        let r: string = network::connect_poll()
+        if r != "" is
+            n.connecting = false
+            network::connect_clear()
+            n.online = network::is_online()
+            n.wifi_msg = if r == "ok" then "Połączono." else r
+        end
+    end
+
+    if n.step == model::Step::Installing is
+        let p: model::Progress = installer_run::poll()
+        n.progress = p
+        if p.state == "idle" is
+            n.idle_ticks = n.idle_ticks + 1
+            if n.idle_ticks > 150 is
+                n.error_msg = "Wykonawca instalacji nie wystartował. Sprawdź /var/log/hackeros-installer.log."
+                n.install_ok = false
+                n.step = model::Step::Done
+            end
+        end
+        if p.state == "ok" || p.state == "failed" is
+            n.install_ok = p.state == "ok"
+            if n.install_ok is config_io::clear_resume_config() end
+            n.step = model::Step::Done
+        end
+    end
+    return n
+end
+
+;; ── ekrany z polami tekstowymi: wspólny routing ──────────────────────
+
+pub fn next_visible(m: ui_state::Model, from: int, count: int) -> int is
+    let mut f: int = (from + 1) % count
+    let mut guard: int = 0
+    while !focus_visible(m, f) && guard < count is
+        f = (f + 1) % count
+        guard += 1
+    end
+    return f
+end
+
+;; Które pola ekranu są teraz widoczne (tab pomija ukryte).
+pub fn focus_visible(m: ui_state::Model, f: int) -> bool is
+    if m.step == model::Step::Disk is
+        let is_manual: bool = tui::list_selected_index(m.mode_list) == 2
+        if f == 2 || f == 3 is return !is_manual end
+        if f == 4 is return !is_manual && m.swap_on end
+        if f == 6 || f == 7 is return m.luks_on end
+        return true
+    end
+    return true
+end
+
+pub fn focus_count(step: model::Step) -> int is
+    if step == model::Step::Network is return 4 end
+    if step == model::Step::Disk is return 8 end
+    if step == model::Step::Profile is return 1 end
+    if step == model::Step::Account is return 8 end
+    return 1
+end
