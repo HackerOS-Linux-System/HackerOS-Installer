@@ -1,0 +1,168 @@
+use "bit -> tui"     from "tui"
+
+mod model
+mod system_scan
+mod network
+mod profiles
+mod locales
+
+pub fn max_parts() -> int is return 12 end
+pub fn fs_options() -> [string] is return ["ext4", "btrfs", "xfs", "vfat", "swap"] end
+pub fn root_fs_options() -> [string] is return ["ext4", "btrfs", "xfs"] end
+pub fn mode_ids() -> [string] is return ["auto", "alongside", "manual"] end
+pub fn mode_labels() -> [string] is
+    return ["Wymaż cały dysk", "Obok istniejących systemów (dual-boot)", "Ręcznie (własne partycje)"]
+end
+
+;; ── model ─────────────────────────────────────────────────────────
+
+pub struct Model is
+    pub step: model::Step
+    pub focus: int
+
+    pub locale_list:   any
+    pub keyboard_list: any
+    pub timezone_list: any
+
+    ;; sieć
+    pub online:      bool
+    pub wifi_nets:   [model::WifiNet]
+    pub wifi_list:   any
+    pub wifi_pw:     any
+    pub wifi_msg:    string
+    pub connecting:  bool
+    pub mirror_list: any
+    pub mirror_url:  any
+
+    ;; dysk
+    pub disk_list:   any
+    pub disks:       [model::Disk]
+    pub mode_list:   any
+    pub fs_list:     any
+    pub swap_on:     bool
+    pub swap_input:  any
+    pub luks_on:     bool
+    pub luks_pw:     any
+    pub luks_pw2:    any
+    pub os_raw:      string
+    pub os_scanned:  bool
+
+    ;; partycje (tryb ręczny)
+    pub parts:       [model::PartInfo]
+    pub mp_inputs:   [any]
+    pub part_fs:     [int]
+    pub part_fmt:    [bool]
+    pub part_row:    int
+
+    ;; pakiety
+    pub profile_list: any
+    pub hsharp_on:    bool
+    pub bit_on:       bool
+
+    ;; konto
+    pub hostname_input: any
+    pub username_input: any
+    pub fullname_input: any
+    pub password_input: any
+    pub password2_input: any
+    pub rootpw_input:   any
+    pub rootpw2_input:  any
+    pub admin_on:       bool
+
+    ;; podsumowanie
+    pub accepted:         bool
+    pub show_plan:        bool
+    pub plan_scroll:      int
+    pub resume_available: bool
+    pub resume_on:        bool
+
+    pub uefi: bool
+    pub error_msg: string
+
+    ;; instalacja
+    pub progress:    model::Progress
+    pub install_ok:  bool
+    pub idle_ticks:  int
+
+    ;; rozmiar terminala — aktualizowany komunikatem resize (tui::run wysyła go zaraz po init)
+    pub term_w: int
+    pub term_h: int
+
+    pub quitting: bool
+end
+
+pub fn list_from(items: [string]) -> any is
+    return tui::list_new(if items.len() == 0 then ["(brak)"] else items)
+end
+
+pub fn init() -> any is
+    let disks: [model::Disk] = system_scan::detect_disks()
+    let mut disk_labels: [string] = []
+    let mut i: int = 0
+    while i < disks.len() is
+        disk_labels.push(model::disk_label(disks[i]))
+        i += 1
+    end
+    if disk_labels.len() == 0 is disk_labels.push("(nie wykryto żadnego dysku)") end
+
+    let mut hostname_ti: any = tui::textinput_new("nazwa-hosta")
+    hostname_ti = tui::textinput_set_value(hostname_ti, system_scan::default_hostname())
+    let mut swap_ti: any = tui::textinput_new("2048")
+    swap_ti = tui::textinput_set_value(swap_ti, "2048")
+
+    return Model {
+        step: model::Step::Welcome, focus: 0,
+
+        locale_list:   tui::list_new(locales::locale_labels()),
+        keyboard_list: tui::list_new(locales::keyboard_labels()),
+        timezone_list: tui::list_new(locales::timezone_labels()),
+
+        online: false, wifi_nets: [], wifi_list: list_from([]),
+        wifi_pw: tui::textinput_new("hasło sieci"), wifi_msg: "", connecting: false,
+        mirror_list: tui::list_new(network::mirror_labels()),
+        mirror_url: tui::textinput_new("https://mirror.example.org/archlinux"),
+
+        disk_list: tui::list_new(disk_labels), disks: disks,
+        mode_list: tui::list_new(mode_labels()),
+        fs_list: tui::list_new(root_fs_options()),
+        swap_on: true, swap_input: swap_ti,
+        luks_on: false, luks_pw: tui::textinput_new("min. 8 znaków"), luks_pw2: tui::textinput_new("powtórz"),
+        os_raw: "", os_scanned: false,
+
+        parts: [], mp_inputs: [], part_fs: [], part_fmt: [], part_row: 0,
+
+        profile_list: tui::list_new(profile_menu()), hsharp_on: false, bit_on: false,
+
+        hostname_input: hostname_ti,
+        username_input: tui::textinput_new("np. hacker"),
+        fullname_input: tui::textinput_new("opcjonalnie"),
+        password_input: tui::textinput_new("hasło"),
+        password2_input: tui::textinput_new("powtórz hasło"),
+        rootpw_input: tui::textinput_new("puste = root zablokowany"),
+        rootpw2_input: tui::textinput_new("powtórz hasło roota"),
+        admin_on: true,
+
+        accepted: false, show_plan: false, plan_scroll: 0,
+        resume_available: false, resume_on: false,
+
+        uefi: system_scan::detect_uefi(), error_msg: "",
+
+        progress: model::Progress { state: "idle", step: 0, total: 0, label: "", percent: 0 },
+        install_ok: false, idle_ticks: 0,
+
+        term_w: 80, term_h: 24,
+
+        quitting: false
+    }
+end
+
+pub fn profile_menu() -> [string] is
+    let ps: [model::Profile] = profiles::all()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < ps.len() is
+        out.push(ps[i].label + (if profiles::needs_network(ps[i]) then "  [wymaga sieci]" else "") + "  —  " + ps[i].description)
+        i += 1
+    end
+    return out
+end
