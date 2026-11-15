@@ -29,7 +29,10 @@ pub fn to_json(cfg: model::InstallConfig) -> string is
 end
 
 pub fn save_summary(cfg: model::InstallConfig, path: string) is
-    fs::write(path, json::stringify_pretty(to_json(cfg), 2))
+    ;; Uwaga: `json::stringify_pretty(v, 2)` z std koliduje w backendzie C++
+    ;; z wbudowanym `json_stringify_pretty(v)` (ten sam symbol, różna
+    ;; liczba argumentów) — wołamy więc wbudowaną wersję wprost.
+    fs::write(path, json_stringify_pretty(to_json(cfg)))
 end
 
 ;; ── Zapis do wznawiania (klucz=wartość, bez haseł) ───────────────────
@@ -41,7 +44,10 @@ pub fn clear_resume_config() is
     if fs::exists(resume_path()) is fs::remove(resume_path()) end
 end
 
-fn b(v: bool) -> string is return if v then "1" else "0" end
+fn b(v: bool) -> string is
+    let r: string = if v then "1" else "0"
+    return r
+end
 
 fn line(key: string, val: string) -> string is
     return key + "=" + util::one_line(val) + "\n"
