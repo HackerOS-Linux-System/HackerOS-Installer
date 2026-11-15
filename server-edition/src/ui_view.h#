@@ -1,0 +1,140 @@
+use "bit -> tui"     from "tui"
+use "std -> strings" from "str"
+
+mod model
+mod steps
+mod installer_run
+mod config_io
+mod ui_state
+mod ui_cfg
+mod ui_widgets
+mod ui_view_form
+
+pub fn view_summary(m: ui_state::Model) -> string is
+    let cfg: model::InstallConfig = ui_cfg::build_cfg(m)
+    let lines: [string] = config_io::summary_lines(cfg)
+    let mut body: string = ""
+    let mut i: int = 0
+    while i < lines.len() is
+        body = body + lines[i] + "\n"
+        i += 1
+    end
+
+    let plan_lines: [string] = installer_run::preview_plan(cfg)
+    body = body + "\n" + tui::colorize("[p] plan instalacji: " + to_string(plan_lines.len()) + " kroków " +
+        (if m.show_plan then "(↑/↓ przewijanie)" else "(naciśnij p, aby rozwinąć)"), "yellow") + "\n"
+    if m.show_plan is
+        let mut k: int = m.plan_scroll
+        let mut shown: int = 0
+        while k < plan_lines.len() && shown < 14 is
+            body = body + "  " + plan_lines[k] + "\n"
+            k += 1
+            shown += 1
+        end
+        if k < plan_lines.len() is body = body + "  …\n" end
+    end
+
+    if m.resume_available is
+        body = body + "\n" + ui_widgets::check(m.resume_on) + " [r] wznów poprzednią próbę (pomiń wykonane kroki) — odznacz, aby zacząć od zera\n"
+    end
+
+    let warn: string = if cfg.partition_mode == "auto" then "Rozumiem, że dysk zostanie wymazany, i chcę kontynuować"
+        elsif cfg.partition_mode == "alongside" then "Rozumiem, że zmiany obejmą tablicę partycji i bootloader, i chcę kontynuować"
+        else "Rozumiem, że zaznaczone partycje zostaną sformatowane, i chcę kontynuować"
+    return ui_widgets::header(m) + "\n\n" + body + "\n" + ui_widgets::check(m.accepted) + " " + warn + " (spacja)" +
+        ui_widgets::error_block(m) + "\n" +
+        tui::help_view(["spacja", "p", "r", "enter", "esc"], ["potwierdź", "plan", "wznów", "instaluj", "wstecz"])
+end
+
+pub fn view_installing(m: ui_state::Model) -> string is
+    let p: model::Progress = m.progress
+    let bar: any = tui::progress_set(tui::progress_new(50), p.percent)
+    let r: model::InstallResult = installer_run::result()
+    let mut out: string = ui_widgets::header(m) + "\n\n" + tui::progress_view(bar) + "\n" +
+        "Krok " + to_string(p.step + 1) + " z " + to_string(p.total) + ": " + p.label + "\n\n"
+    let mut start: int = r.steps.len() - 6
+    if start < 0 is start = 0 end
+    let mut i: int = start
+    while i < r.steps.len() is
+        let s: model::InstallStepResult = r.steps[i]
+        if s.status != "skip" is
+            let mark: string = if s.status == "ok" then tui::colorize("OK    ", "green") elsif s.status == "warn" then tui::colorize("UWAGA ", "yellow") else tui::colorize("BŁĄD  ", "red")
+            out = out + mark + s.label + "\n"
+        end
+        i += 1
+    end
+    return out + "\nNie wyłączaj komputera. Instalacja działa w tle — Ctrl+C zamyka tylko to okno.\n"
+end
+
+pub fn last_lines(text: string, n: int) -> string is
+    let lines: [string] = str::split(text, "\n")
+    let mut start: int = lines.len() - n
+    if start < 0 is start = 0 end
+    let mut out: [string] = []
+    let mut i: int = start
+    while i < lines.len() is
+        out.push(lines[i])
+        i += 1
+    end
+    return str::join(out, "\n")
+end
+
+pub fn view_done(m: ui_state::Model) -> string is
+    let r: model::InstallResult = installer_run::result()
+    let title: string = if m.install_ok then "HackerOS został zainstalowany" else "Instalacja nie powiodła się"
+    let mut body: string = ""
+    if !m.install_ok && r.failed_label != "" is
+        body = body + tui::style_render(ui_widgets::error_style(), "Błąd w kroku: " + r.failed_label + " (kod wyjścia " + to_string(r.failed_code) + ")") + "\n"
+        if r.error_text != "" is body = body + tui::colorize(last_lines(r.error_text, 8), "8") + "\n" end
+        body = body + "\n"
+    end
+    if m.error_msg != "" is body = body + tui::style_render(ui_widgets::error_style(), m.error_msg) + "\n\n" end
+    let mut i: int = 0
+    while i < r.steps.len() is
+        let s: model::InstallStepResult = r.steps[i]
+        if s.status != "skip" is
+            let mark: string = if s.status == "ok" then tui::colorize("OK    ", "green") elsif s.status == "warn" then tui::colorize("UWAGA ", "yellow") else tui::colorize("BŁĄD  ", "red")
+            body = body + mark + s.label + "\n"
+        end
+        i += 1
+    end
+    let help: string = if m.install_ok then tui::help_view(["r", "q"], ["uruchom ponownie", "wyjście"])
+        else tui::help_view(["r", "q"], ["wznów od miejsca błędu", "wyjście"])
+    return tui::style_render(ui_widgets::title_style(), title) + "\n\n" + body +
+        "\nPełny log: " + r.log_path + "\n" + help
+end
+
+pub fn view(model_in: any) -> string is
+    let m: ui_state::Model = model_in
+    let content: string = if m.step == model::Step::Welcome then ui_view_form::view_welcome(m)
+        elsif m.step == model::Step::Language then ui_view_form::view_choice(m, m.locale_list)
+        elsif m.step == model::Step::Keyboard then ui_view_form::view_choice(m, m.keyboard_list)
+        elsif m.step == model::Step::Timezone then ui_view_form::view_choice(m, m.timezone_list)
+        elsif m.step == model::Step::Network then ui_view_form::view_network(m)
+        elsif m.step == model::Step::Disk then ui_view_form::view_disk(m)
+        elsif m.step == model::Step::Partitions then ui_view_form::view_partitions(m)
+        elsif m.step == model::Step::Profile then ui_view_form::view_profile(m)
+        elsif m.step == model::Step::Account then ui_view_form::view_account(m)
+        elsif m.step == model::Step::Summary then view_summary(m)
+        elsif m.step == model::Step::Installing then view_installing(m)
+        else view_done(m)
+
+    return frame(m, content)
+end
+
+;; Panel na cały terminal + pasek statusu. Obramowanie (2) i wcięcie poziome (2×2) odejmujemy
+;; od szerokości, obramowanie (2) i wcięcie pionowe (2×1) od wysokości; jedna linia zostaje
+;; na pasek statusu, a jedna wolna, żeby ostatni wiersz nie przewijał ekranu.
+;; Wysokość ustawiamy tylko gdy treść się mieści — dłuższa nie jest obcinana.
+pub fn frame(m: ui_state::Model, content: string) -> string is
+    let mut st: any = ui_widgets::panel_style()
+    let w: int = m.term_w - 6
+    if w >= 40 is st = tui::style_width(st, w) end
+    let h: int = m.term_h - 6
+    if h > 0 && tui::block_height(content) <= h is st = tui::style_height(st, h) end
+    let left: string = "HackerOS Installer · Server Edition · " + (if m.uefi then "UEFI" else "BIOS") +
+        " · krok " + to_string(steps::step_index(m.step) + 1) + "/" + to_string(steps::step_count())
+    let right: string = "ctrl+c wyjście"
+    let bar: string = tui::colorize(tui::statusbar(left, right, if m.term_w > 2 then m.term_w - 2 else 78), "8")
+    return tui::style_render(st, content) + "\n " + bar
+end
