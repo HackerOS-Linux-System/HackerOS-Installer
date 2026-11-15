@@ -112,10 +112,10 @@ pub fn detect_partitions(disk: string) -> [model::PartInfo] is
         let line: string = str::trim(lines[i])
         if line != "" && extract_field(line, "TYPE") == "part" is
             let size: string = extract_field(line, "SIZE")
-            let bytes: int = if str::is_numeric(size) then str_to_int(size) else 0
+            let size_bytes: int = if str::is_numeric(size) then str_to_int(size) else 0
             parts.push(model::PartInfo {
                 device:  extract_field(line, "NAME"),
-                size_mb: bytes / 1024 / 1024,
+                size_mb: size_bytes / 1024 / 1024,
                 fstype:  extract_field(line, "FSTYPE"),
                 label:   extract_field(line, "LABEL"),
                 is_esp:  str::to_lower(extract_field(line, "PARTTYPE")) == esp_guid()
