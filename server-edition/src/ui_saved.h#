@@ -1,0 +1,87 @@
+use "bit -> tui"     from "tui"
+
+mod model
+mod network
+mod profiles
+mod locales
+mod config_io
+mod ui_state
+mod ui_cfg
+mod ui_nav
+
+;; Wczytanie zapisanej konfiguracji (wznawianie) — wypełnia listy i pola.
+pub fn index_of_str(items: [string], x: string) -> int is
+    let mut i: int = 0
+    while i < items.len() is
+        if items[i] == x is return i end
+        i += 1
+    end
+    return -1
+end
+
+pub fn select_idx(l: any, items: [string], x: string) -> any is
+    let idx: int = index_of_str(items, x)
+    if idx < 0 is return l end
+    let mut cur: any = l
+    let mut guard: int = 0
+    while tui::list_selected_index(cur) < idx && guard < 500 is
+        cur = tui::list_update(cur, tui::key_msg("down"))
+        guard += 1
+    end
+    return cur
+end
+
+pub fn apply_saved(m: ui_state::Model) -> ui_state::Model is
+    let c: model::InstallConfig = config_io::load_resume(ui_cfg::build_cfg(m))
+    let mut n: ui_state::Model = m
+    n.locale_list   = select_idx(m.locale_list, locales::locale_codes(), c.locale)
+    n.keyboard_list = select_idx(m.keyboard_list, locales::keyboard_codes(), c.keyboard)
+    n.timezone_list = select_idx(m.timezone_list, locales::timezone_codes(), c.timezone)
+    n.mirror_list   = select_idx(m.mirror_list, network::mirror_ids(), c.mirror_id)
+    n.mirror_url    = tui::textinput_set_value(m.mirror_url, c.mirror_url)
+
+    let mut dev_list: [string] = []
+    let mut i: int = 0
+    while i < m.disks.len() is
+        dev_list.push(m.disks[i].device)
+        i += 1
+    end
+    n.disk_list = select_idx(m.disk_list, dev_list, c.target_disk)
+    n.mode_list = select_idx(m.mode_list, ui_state::mode_ids(), c.partition_mode)
+    n.fs_list   = select_idx(m.fs_list, ui_state::root_fs_options(), c.filesystem)
+    n.swap_on = c.enable_swap
+    n.swap_input = tui::textinput_set_value(m.swap_input, to_string(c.swap_size_mb))
+    n.luks_on = c.luks
+    n.profile_list = select_idx(m.profile_list, profiles::ids(), c.profile)
+    n.hsharp_on = c.install_hsharp
+    n.bit_on = c.install_bit
+    n.hostname_input = tui::textinput_set_value(m.hostname_input, c.hostname)
+    n.username_input = tui::textinput_set_value(m.username_input, c.user.username)
+    n.fullname_input = tui::textinput_set_value(m.fullname_input, c.user.full_name)
+    n.admin_on = c.user.is_admin
+    n.error_msg = ""
+
+    ;; ręczne partycje: odtwarzamy po wejściu na ekran Partycje
+    if c.partition_mode == "manual" is
+        let mut tmp: ui_state::Model = ui_nav::enter_step(n, model::Step::Partitions)
+        let mut k: int = 0
+        while k < tmp.parts.len() is
+            let mut j: int = 0
+            while j < c.manual_parts.len() is
+                if c.manual_parts[j].device == tmp.parts[k].device is
+                    tmp.mp_inputs = ui_cfg::set_any(tmp.mp_inputs, k, tui::textinput_set_value(tmp.mp_inputs[k], c.manual_parts[j].mountpoint))
+                    tmp.part_fmt = ui_cfg::set_bool(tmp.part_fmt, k, c.manual_parts[j].format)
+                    let fidx: int = index_of_str(ui_state::fs_options(), c.manual_parts[j].fs)
+                    if fidx >= 0 is tmp.part_fs = ui_cfg::set_int(tmp.part_fs, k, fidx) end
+                end
+                j += 1
+            end
+            k += 1
+        end
+        n = tmp
+    end
+    ;; Hasła nie są zapisywane — wracamy do ekranu Konto, żeby wpisać je ponownie.
+    let mut acc: ui_state::Model = ui_nav::enter_step(n, model::Step::Account)
+    acc.error_msg = "Wczytano zapisaną konfigurację. Wpisz ponownie hasła — nie są nigdzie zapisywane."
+    return acc
+end
