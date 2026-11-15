@@ -1,0 +1,134 @@
+use "bit -> tui"     from "tui"
+use "std -> process" from "process"
+
+mod model
+mod config_io
+mod ui_state
+mod ui_nav
+mod ui_update_forms
+mod ui_saved
+
+;; ── update: Summary / Done ───────────────────────────────────────────
+
+pub fn update_summary(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "space") is
+        n.accepted = !m.accepted
+        return n
+    end
+    if tui::msg_is_key(msg, "p") is
+        n.show_plan = !m.show_plan
+        n.plan_scroll = 0
+        return n
+    end
+    if tui::msg_is_key(msg, "r") && m.resume_available is
+        n.resume_on = !m.resume_on
+        return n
+    end
+    if m.show_plan is
+        if tui::msg_is_key(msg, "down") is
+            n.plan_scroll = m.plan_scroll + 1
+            return n
+        end
+        if tui::msg_is_key(msg, "up") is
+            n.plan_scroll = if m.plan_scroll > 0 then m.plan_scroll - 1 else 0
+            return n
+        end
+    end
+    if tui::msg_is_key(msg, "esc") is return ui_nav::go_back(m) end
+    if tui::msg_is_key(msg, "enter") is
+        if !m.accepted is
+            n.error_msg = "Naciśnij spację, aby potwierdzić podsumowanie."
+            return n
+        end
+        return ui_nav::try_advance(m)
+    end
+    return m
+end
+
+pub fn update_done(m: ui_state::Model, msg: any) -> ui_state::Model is
+    let mut n: ui_state::Model = m
+    if tui::msg_is_key(msg, "r") is
+        if m.install_ok is
+            process::run("reboot")
+            n.quitting = true
+        else is
+            return ui_nav::begin_install(m, true)
+        end
+    end
+    return n
+end
+
+;; ── update główny ────────────────────────────────────────────────────
+
+pub fn update(model_in: any, msg: any) -> (any, fn() -> any) is
+    let m: ui_state::Model = model_in
+
+    if tui::is_ctrl_c(msg) is
+        let mut q: ui_state::Model = m
+        q.quitting = true
+        return (q, tui::cmd_quit())
+    end
+
+    if tui::msg_is_resize(msg) is
+        let mut r: ui_state::Model = m
+        r.term_w = tui::msg_width(msg)
+        r.term_h = tui::msg_height(msg)
+        return (r, tui::cmd_none())
+    end
+
+    if tui::msg_is_tick(msg) is
+        return (ui_nav::on_tick(m), tui::cmd_none())
+    end
+
+    if m.step == model::Step::Welcome is
+        if tui::msg_is_key(msg, "enter") is return (ui_nav::try_advance(m), tui::cmd_none()) end
+        if tui::msg_is_key(msg, "l") && config_io::has_resume_config() is
+            let mut n: ui_state::Model = ui_saved::apply_saved(m)
+            return (n, tui::cmd_none())
+        end
+        if tui::msg_is_key(msg, "q") is
+            let mut q: ui_state::Model = m
+            q.quitting = true
+            return (q, tui::cmd_quit())
+        end
+        return (m, tui::cmd_none())
+    end
+
+    let mut n: ui_state::Model = m
+    if m.step == model::Step::Language is
+        if tui::msg_is_key(msg, "enter") is return (ui_nav::try_advance(m), tui::cmd_none()) end
+        if tui::msg_is_key(msg, "esc") is return (ui_nav::go_back(m), tui::cmd_none()) end
+        n.locale_list = tui::list_update(m.locale_list, msg)
+        return (n, tui::cmd_none())
+    end
+    if m.step == model::Step::Keyboard is
+        if tui::msg_is_key(msg, "enter") is return (ui_nav::try_advance(m), tui::cmd_none()) end
+        if tui::msg_is_key(msg, "esc") is return (ui_nav::go_back(m), tui::cmd_none()) end
+        n.keyboard_list = tui::list_update(m.keyboard_list, msg)
+        return (n, tui::cmd_none())
+    end
+    if m.step == model::Step::Timezone is
+        if tui::msg_is_key(msg, "enter") is return (ui_nav::try_advance(m), tui::cmd_none()) end
+        if tui::msg_is_key(msg, "esc") is return (ui_nav::go_back(m), tui::cmd_none()) end
+        n.timezone_list = tui::list_update(m.timezone_list, msg)
+        return (n, tui::cmd_none())
+    end
+    if m.step == model::Step::Network    is return (ui_update_forms::update_network(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Disk       is return (ui_update_forms::update_disk(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Partitions is return (ui_update_forms::update_partitions(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Profile    is return (ui_update_forms::update_profile(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Account    is return (ui_update_forms::update_account(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Summary    is return (update_summary(m, msg), tui::cmd_none()) end
+    if m.step == model::Step::Installing is return (m, tui::cmd_none()) end
+
+    ;; Done
+    let d: ui_state::Model = update_done(m, msg)
+    if d.quitting is return (d, tui::cmd_quit()) end
+    if tui::msg_is_key(msg, "q") || tui::msg_is_key(msg, "enter") is
+        let mut q: ui_state::Model = d
+        q.quitting = true
+        return (q, tui::cmd_quit())
+    end
+    return (d, tui::cmd_none())
+end
