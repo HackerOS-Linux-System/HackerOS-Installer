@@ -21,9 +21,6 @@
 [dependencies]
 
 [commands]
--> embed
---> run => python3 ../tools/embed_runner.py
---> description => Przegeneruj src/runner_embed.h# z runtime/runner.sh (po każdej zmianie runner.sh)
 -> test
---> run => sh ../tests/test_runner.sh
---> description => Testy runner.sh
+--> run => h# test src/hos_runner_test.h#
+--> description => Testy wykonawcy planu (src/hos_runner.h#)
