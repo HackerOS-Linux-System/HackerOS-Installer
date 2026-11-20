@@ -10,7 +10,6 @@ HackerOS-Installer/
 ├── build.hl
 ├── main/                     rdzeń — H#, biblioteka (hlib), bez żadnego UI
 │   ├── Bit.hk
-│   ├── runtime/runner.sh      wykonawca planu (powłoka; testowany prawdziwym sh)
 │   └── src/
 │       ├── lib.h#              punkt wejścia pakietu
 │       ├── model.h#             model danych
@@ -22,13 +21,24 @@ HackerOS-Installer/
 │       ├── locales.h#           język / klawiatura / strefa
 │       ├── validate.h#          walidacja per krok
 │       ├── plan.h#              plan: auto / obok innych systemów / ręczny, LUKS, GRUB, hooki
-│       ├── runner_embed.h#      GENEROWANY z runtime/runner.sh (tools/embed_runner.py)
+│       ├── hos_runner.h#        wykonawca planu (`--run-plan`) i polecenia kroków (`--hos ...`) — w H#
+│       ├── hos_runner_test.h#   testy wykonawcy (`h# test`)
 │       ├── installer_run.h#     start/poll/result/probe + preview_plan
 │       └── config_io.h#         JSON (zapis/odczyt do wznawiania) + linie Summary
 ├── standard/                 GUI — Silver 0.4
 ├── server-edition/           TTY — tui
-├── tools/embed_runner.py     runner.sh → runner_embed.h#
-└── tests/test_runner.sh      testy wykonawcy (sh)
+│   └── src/
+│       ├── main.h#              punkt wejścia (tui::run + wrappery init/update/view)
+│       ├── ui_state.h#          struktura Model, init, stałe list wyboru
+│       ├── ui_cfg.h#            Model → InstallConfig, pomocnicze operacje na tablicach
+│       ├── ui_nav.h#            nawigacja, ticki (Wi-Fi/instalacja), routing fokusu
+│       ├── ui_update_forms.h#   update: sieć, dysk, partycje, profil, konto
+│       ├── ui_update.h#         update: podsumowanie, koniec + główne update
+│       ├── ui_saved.h#          wczytanie zapisanej konfiguracji
+│       ├── ui_widgets.h#        style i drobne elementy widoku
+│       ├── ui_view_form.h#      widoki: powitanie … konto
+│       └── ui_view.h#           widoki: podsumowanie, instalacja, koniec + view/ramka
+└── tools/embed.h#            generator w H#: frontend (HTML+CSS+JS) → standard/src/frontend_embed.h#
 ```
 
 ## Kroki kreatora
@@ -45,10 +55,10 @@ Welcome → Język → Klawiatura → Strefa → **Sieć** → **Dysk** → *Par
 - ESP montowane w `/boot/efi` (kernel zostaje na partycji root, dzięki czemu współdzielone ESP nie jest zaśmiecane).
 
 **Instalacja bez zamrażania UI**
-- `installer_run::start` zapisuje plan i uruchamia `runner.sh` w tle; interfejsy odpytują `poll()` w `on_tick` (Silver) / w komunikacie „tick” (tui). Zamknięcie okna nie zabija instalacji.
+- `installer_run::start` zapisuje plan i uruchamia tę samą binarkę w trybie `--run-plan` (setsid, `hos_runner.h#`); interfejsy odpytują `poll()` w `on_tick` (Silver) / w komunikacie „tick” (tui). Zamknięcie okna nie zabija instalacji.
 
 **Odporność na błędy**
-- Prawdziwe kody wyjścia: `runner.sh` uruchamia każdy krok w podpowłoce i zapisuje `rc` (koniec z heurystyką `looks_like_failure`). Kroki mają flagi: `c` (miękki błąd → ostrzeżenie), `s` (sekretne: nie logowane), `a` (zawsze przy wznawianiu).
+- Prawdziwe kody wyjścia: wykonawca (`hos_runner::execute`) uruchamia każdy krok przez `sh -c` i zapisuje `rc` (koniec z heurystyką `looks_like_failure`). Kroki mają flagi: `c` (miękki błąd → ostrzeżenie), `s` (sekretne: nie logowane), `a` (zawsze przy wznawianiu).
 - Wznawianie: checkpoint + odcisk planu (bez kroków sekretnych). Zmiana konfiguracji = bezpieczny start od zera. Config zapisywany przez `config_io::save_resume` (bez haseł); Welcome oferuje jego wczytanie.
 - Hasła haszowane (`openssl passwd -6`, przez stdin), `chpasswd -e`; wszystko od użytkownika przechodzi przez `util::sh_quote` — usunięty błąd z zagnieżdżonymi cudzysłowami w `useradd -c`.
 - Ochrona przed wyborem dysku z nośnikiem live (`hos_check_target`).
@@ -67,12 +77,14 @@ cd standard && bit run     # GUI (wymaga .ttf w frontend/fonts/, patrz fonts/REA
 cd server-edition && bit run   # TTY — tylko interpreter (patrz README biblioteki tui)
 ```
 
-Po zmianie `main/runtime/runner.sh`:
+Po zmianie `main/src/hos_runner.h#`:
 
 ```
-python3 tools/embed_runner.py     # albo: bit embed
-sh tests/test_runner.sh           # albo: bit test
+cd main && h# test src/hos_runner_test.h#    # albo: bit test-runner
 ```
+
+Po zmianie frontendu (`standard/frontend`) osadzony moduł odświeża hook `pre-build` członka `standard`
+(albo ręcznie: `h# run tools/embed.h# frontend .` / `bit embed`).
 
 ## Pliki konfiguracyjne (opcjonalne, na ISO live)
 
@@ -85,7 +97,7 @@ Obrazy profili: `/run/hackeros/<obraz>.sfs`; gdy brak, używany jest `airootfs.s
 
 ## Ograniczenia
 
-- Kod H# **nie był kompilowany** w środowisku, w którym powstał (brak toolchainu `h#`/`bit`); sprawdzono natomiast `runner.sh` testami na prawdziwym `sh` oraz statyczną kontrolą składni bloków H#. Pierwszy build może wskazać drobne literówki.
+- Kod H# **nie był kompilowany** w środowisku, w którym powstał (brak toolchainu `h#`/`bit`); wykonawca planu (`hos_runner.h#`) ma testy w H# (`h# test`). Rzeczywiste operacje na dyskach (parted, mkfs, cryptsetup, pacstrap) nie są testowane automatycznie.
 - Wolne miejsce w trybie dual-boot wykrywa `parted`; zmniejszanie istniejących partycji (np. NTFS) robisz osobno (GParted) — instalator tego nie robi.
 - Szyfrowanie: root na LUKS2 wymaga niezaszyfrowanej `/boot`; GRUB nie odblokowuje LUKS.
 - Serwer lustrzany zapisywany jest do `/etc/pacman.d/mirrorlist` nowego systemu.
