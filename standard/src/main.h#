@@ -12,9 +12,9 @@ mod network
 mod profiles
 mod locales
 mod frontend_embed
+mod hos_runner
 mod validate
 mod plan
-mod runner_embed
 mod installer_run
 mod config_io
 
@@ -26,7 +26,7 @@ mod config_io
 ;; BEZSTANOWĄ warstwą komend: każda komenda dostaje JSON, woła rdzeń
 ;; (pakiet `main`) i zwraca JSON. Typowany kontrakt: frontend/src/api.ts.
 ;;
-;;  * Instalacja biegnie w TLE (installer_run::start → runner.sh); frontend
+;;  * Instalacja biegnie w TLE (installer_run::start → hos_runner (--run-plan)); frontend
 ;;    odpytuje `poll_install` timerem — okno nigdy nie zamarza.
 ;;  * Hasła przechodzą przez most tylko w pamięci (start_install) i trafiają
 ;;    do pliku sekretów 0600, nigdy do planu ani logu.
@@ -474,6 +474,8 @@ fn load_frontend(app: app::App) -> app::App is
 end
 
 fn main() is
+    ;; tryby --run-plan / --hos (wykonawca planu i pomocnicze polecenia) — bez interfejsu
+    if hos_runner::dispatch() is return end
     let mut a: app::App = app::new("Instalator HackerOS", 960, 700)
     ;; font opcjonalny: bez pliku .ttf Silver używa domyślnego fontu systemowego
     let font: string = find_font()
