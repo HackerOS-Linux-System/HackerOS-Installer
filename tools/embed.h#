@@ -1,0 +1,139 @@
+use "std -> fs"      from "fs"
+use "std -> strings" from "str"
+use "std -> env"     from "env"
+
+fn chunk_len() -> int is return 2000 end
+
+;; Surowy tekst jednej linii → zawartość literału H# (bez końcowego \n).
+fn esc(t: string) -> string is
+    let mut s: string = str::replace_all(t, "\\", "\\\\")
+    s = str::replace_all(s, "\"", "\\\"")
+    s = str::replace_all(s, "{", "{{{{")   ;; w literale H# "{{{{" to dwie klamry: {{
+    s = str::replace_all(s, "}", "}}}}")
+    s = str::replace_all(s, "\t", "\\t")
+    s = str::replace_all(s, "\r", "")
+    return s
+end
+
+;; Linie `    s = s + "..."` dla całego tekstu; długie linie dzielone na kawałki.
+fn emit_lines(text: string) -> string is
+    let parts: [string] = str::split(text, "\n")
+    let mut out: string = ""
+    let n: int = parts.len()
+    let mut i: int = 0
+    while i < n is
+        let line: string = parts[i]
+        let last: bool = i == n - 1
+        let nl: string = if last then "" else "\\n"
+        if last && line == "" is
+            i += 1
+            continue
+        end
+        let len: int = line.len()
+        if len <= chunk_len() is
+            out = out + "    s = s + \"" + esc(line) + nl + "\"\n"
+        else is
+            let mut a: int = 0
+            while a < len is
+                let mut b: int = a + chunk_len()
+                if b > len is b = len end
+                let tail: string = if b >= len then nl else ""
+                out = out + "    s = s + \"" + esc(str::slice(line, a, b)) + tail + "\"\n"
+                a = b
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+fn emit_fn(name: string, doc: string, text: string) -> string is
+    return ";; " + doc + "\npub fn " + name + "() -> string is\n    let mut s: string = \"\"\n" +
+        emit_lines(text) + "    return s\nend\n"
+end
+
+fn read_req(path: string) -> string is
+    if !fs::exists(path) is
+        write("brak pliku: " + path)
+        if str::index_of(path, "dist/app.js") >= 0 is
+            write("najpierw zbuduj interfejs: cd standard/frontend && npm install && npm run build")
+        end
+        exit(2)
+    end
+    return str::replace_all(fs::read(path), "\r\n", "\n")
+end
+
+;; Wstawia bundle JS jako inline <script> przed </body>. Sekwencja `</script` wewnątrz JS
+;; zamknęłaby blok, więc zamieniamy ją na równoważny zapis `<\/script`.
+fn build_html(index: string, js: string) -> string is
+    let safe: string = str::replace_all(js, "</script", "<\\/script")
+    let tag: string = "<script>\n" + safe + "\n</script>\n"
+    if str::index_of(index, "</body>") >= 0 is
+        return str::replace(index, "</body>", tag + "</body>")
+    end
+    return index + tag
+end
+
+;; Silver traktuje takie ciągi w HTML jako szablony — w osadzonym JS ich nie chcemy.
+fn lint_js(js: string) is
+    let pats: [string] = [" each=", " if=", " if-not=", "{{{{"]
+    let mut i: int = 0
+    while i < pats.len() is
+        if str::index_of(js, pats[i]) >= 0 is
+            write("UWAGA: bundle JS zawiera '" + pats[i] + "' — Silver może to potraktować jako szablon")
+        end
+        i += 1
+    end
+end
+
+fn gen_frontend(root: string) -> string is
+    let fe: string = root + "/standard/frontend"
+    let index: string = read_req(fe + "/index.html")
+    let css: string = read_req(fe + "/style.css")
+    let js: string = read_req(fe + "/dist/app.js")
+    lint_js(js)
+    let head: string = ";; WYGENEROWANE przez tools/embed.h# — nie edytuj ręcznie.\n" +
+        ";; Źródła: standard/frontend/{index.html,style.css,dist/app.js}\n\n"
+    return head +
+        emit_fn("index_html", "Strona startowa wraz z wbudowanym <script> (bundle JS).", build_html(index, js)) + "\n" +
+        emit_fn("style_css", "Arkusz stylów interfejsu.", css)
+end
+
+;; Zapisuje plik albo (check) porównuje z istniejącym. Zwraca true, gdy wszystko w porządku.
+fn apply(path: string, content: string, check: bool) -> bool is
+    if check is
+        let cur: string = if fs::exists(path) then fs::read(path) else ""
+        if cur == content is
+            write(path + ": aktualny")
+            return true
+        end
+        write(path + ": NIEAKTUALNY — uruchom: h# run tools/embed.h# frontend")
+        return false
+    end
+    fs::write(path, content)
+    write("zapisano " + path + " (" + to_string(content.len() / 1024) + " KB)")
+    return true
+end
+
+fn main() is
+    let a: [string] = env::args()
+    let mut cmd: string = ""
+    let mut root: string = "."
+    let mut check: bool = false
+    let mut i: int = 1
+    while i < a.len() is
+        if a[i] == "--check" is check = true
+        elsif cmd == "" is cmd = a[i]
+        else is root = a[i] end
+        i += 1
+    end
+    if cmd != "frontend" is
+        write("użycie: h# run tools/embed.h# frontend [ROOT] [--check]")
+        exit(2)
+    end
+    let mut ok: bool = true
+    if cmd == "frontend" is
+        if !apply(root + "/standard/src/frontend_embed.h#", gen_frontend(root), check) is ok = false end
+    end
+    if !ok is exit(1) end
+end
