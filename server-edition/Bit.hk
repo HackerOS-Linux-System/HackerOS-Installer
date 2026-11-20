@@ -17,6 +17,7 @@
 -> link => static
 
 [dependencies]
+-> hackeros-installer-core => path ../main
 -> tui => newest
 
 [default-build]
