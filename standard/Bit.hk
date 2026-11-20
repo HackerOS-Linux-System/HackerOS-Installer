@@ -17,6 +17,7 @@
 -> link => static
 
 [dependencies]
+-> hackeros-installer-core => path ../main
 -> silver => newest
 
 [default-build]
@@ -26,15 +27,15 @@
 -> run     => false
 
 [hooks]
--> pre-build => cd frontend && npm install --no-audit --no-fund && npm run build
+-> pre-build => cd frontend && npm install --no-audit --no-fund && npm run build && cd .. && h# run ../tools/embed.h# frontend ..
 
 [commands]
 -> dev
 --> run => bit run
 --> description => Uruchom instalator (GUI) w trybie podglądu
 -> frontend
---> run => cd frontend && npm install --no-audit --no-fund && npm run build
---> description => Zbuduj interfejs (TypeScript + Solid → frontend/dist/app.js)
+--> run => cd frontend && npm install --no-audit --no-fund && npm run build && cd .. && h# run ../tools/embed.h# frontend ..
+--> description => Zbuduj interfejs (TypeScript + Solid → dist/app.js) i wlinkuj go statycznie (src/frontend_embed.h#)
 -> watch
 --> run => cd frontend && npm run watch
 --> description => Buduj interfejs przy każdej zmianie
